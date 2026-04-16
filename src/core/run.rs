@@ -23,6 +23,9 @@ pub enum ExecutionBackendKind {
     Modal,
     /// Container on Cloudflare Containers (via REST API).
     Cloudflare,
+    /// Managed worker session on OpenCode Zen (opencode.ai).
+    #[serde(rename = "opencode-zen")]
+    OpenCodeZen,
 }
 
 impl ExecutionBackendKind {
@@ -31,6 +34,7 @@ impl ExecutionBackendKind {
             Self::Local => "local",
             Self::Modal => "modal",
             Self::Cloudflare => "cloudflare",
+            Self::OpenCodeZen => "opencode-zen",
         }
     }
 

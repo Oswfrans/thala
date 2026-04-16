@@ -43,16 +43,16 @@ variables, and remote worker backends.
 
 Run `bash dev/setup.sh` — it installs and validates all of these:
 
-| Tool | Local backend | Modal backend | Cloudflare backend | Notes |
-|------|:---:|:---:|:---:|-------|
-| `tmux` | Required | Not needed | Not needed | Worker sessions run inside tmux |
-| `git` | Required | Required | Required | Worktree / branch management |
-| `bd` | Required | Required | Required | Beads CLI for the default task tracker |
-| `gh` | Required | Required | Required | PR creation + CI status. Run `gh auth login` once |
-| `gcloud` | Required | Required | Required | GCP deployments. Run `gcloud auth login` once |
-| `opencode` | Required | Not needed | Not needed | Worker agent binary — runs inside the remote container |
-| `modal` | Not needed | Required | Not needed | Modal CLI. `pip install modal && modal setup` |
-| Your build tools | Depends on hooks | Not needed | Not needed | Whatever your `after_create`/`before_run` hooks call (e.g. `bun`, `npm`, `cargo`) |
+| Tool | Local | OpenCode Zen | Cloudflare | Modal | Notes |
+|------|:---:|:---:|:---:|:---:|-------|
+| `tmux` | Required | Not needed | Not needed | Not needed | Worker sessions run inside tmux |
+| `git` | Required | Required | Required | Required | Worktree / branch management |
+| `bd` | Required | Required | Required | Required | Beads CLI for the default task tracker |
+| `gh` | Required | Required | Required | Required | PR creation + CI status. Run `gh auth login` once |
+| `gcloud` | Required | Required | Required | Required | GCP deployments. Run `gcloud auth login` once |
+| `opencode` | Required | Not needed | Not needed | Not needed | Worker agent binary — runs inside the remote container |
+| `modal` | Not needed | Not needed | Not needed | Required | Modal CLI. `pip install modal && modal setup` |
+| Your build tools | Depends on hooks | Not needed | Not needed | Not needed | Whatever your `before_run` hooks call (e.g. `bun`, `npm`, `cargo`) |
 
 > **Note on build tools:** Thala itself has no dependency on `bun`, `npm`, or any language runtime. The build tools in the table above are driven entirely by the `hooks` you define in your product's `WORKFLOW.md`. If your hooks run `bun install` you need `bun`; if they run `cargo test` you need Rust. Install whatever your hooks require.
 
@@ -192,6 +192,20 @@ Each `WORKFLOW.md` has **two distinct sections** separated by `---` delimiters:
 
 Think of the front matter as "instructions for Thala" and the template body as "instructions for the worker."
 
+### Quickstart — let the wizard do it
+
+Run the interactive wizard instead of writing WORKFLOW.md by hand:
+
+```bash
+./target/release/thala onboard
+```
+
+The wizard asks for your product name, workspace path, tracker, backend choice, and
+Discord details, then generates a ready-to-use WORKFLOW.md. Run
+`thala validate --workflow path/to/WORKFLOW.md` afterwards to confirm it parses.
+
+---
+
 ### Local backend (default)
 
 Workers run as tmux sessions on the same host. No extra credentials needed.
@@ -261,6 +275,74 @@ tracker:
 **Critical:** `before_run` must use `--autostash`. The `after_create` hook (`bun install`)
 writes `bun.lockb` into the worktree before `before_run` runs. Without `--autostash`,
 `git pull --rebase` refuses with "You have unstaged changes".
+
+---
+
+### OpenCode Zen backend
+
+Workers run as managed sessions on OpenCode Zen's infrastructure. No container
+image to build, no separate CLI to install — Zen handles execution end-to-end.
+
+`tmux` and `opencode` are **not** required on the Thala host.
+
+```yaml
+---
+tracker:
+  backend: beads
+  active_states: ["open"]
+  terminal_states: ["Done", "Cancelled"]
+  beads_workspace_root: /path/to/your-app
+  beads_ready_status: open
+
+workspace:
+  root: /path/to/your-app
+
+execution:
+  backend: opencode-zen
+  callback_base_url: "https://thala.yourdomain.com"   # public URL of Thala's gateway
+  github_token_env: THALA_GITHUB_TOKEN
+
+hooks:
+  before_run: "git pull --rebase --autostash origin main"
+  after_run: ""
+
+models:
+  worker: "opencode/kimi-k2.5"
+  manager: "anthropic/claude-opus-4-6"
+  max_review_cycles: 2
+
+limits:
+  max_concurrent_runs: 5
+  stall_timeout_ms: 3600000
+
+retry:
+  max_attempts: 3
+---
+(same Tera prompt template as local backend)
+```
+
+Required environment variables:
+
+```ini
+Environment="OPENCODE_API_KEY=sk-..."
+Environment="THALA_GITHUB_TOKEN=ghp_xxxxxxxxxxxx"
+Environment="THALA_CALLBACK_SECRET=<openssl rand -hex 32>"
+```
+
+Optional:
+
+```ini
+Environment="OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen/v1"   # override for private deployments
+```
+
+The Thala gateway **must be publicly reachable** at `callback_base_url` so Zen
+can POST completion signals. If running locally, use:
+
+```bash
+thala gateway tunnel cloudflare
+```
+
+Per-task backend override via task label: `backend:opencode-zen` or the alias `backend:zen`.
 
 ---
 
@@ -345,14 +427,27 @@ worker:
   github_token_env: THALA_GITHUB_TOKEN
 ```
 
-Additional env vars:
+Required environment variables:
 
+```ini
+Environment="CF_ACCOUNT_ID=your-cloudflare-account-id"
+Environment="CF_API_TOKEN=your-cloudflare-api-token"
+Environment="CF_WORKER_IMAGE=registry.example.com/thala-worker:latest"
+Environment="THALA_GITHUB_TOKEN=ghp_xxxxxxxxxxxx"
+Environment="THALA_CALLBACK_SECRET=<openssl rand -hex 32>"
 ```
-CF_ACCOUNT_ID=your-cloudflare-account-id
-CF_API_TOKEN=your-cloudflare-api-token
-THALA_GITHUB_TOKEN=ghp_xxxxxxxxxxxx
-THALA_CALLBACK_SECRET=<random 32-byte hex string>
+
+Optional resource overrides (both default to Cloudflare's platform defaults when unset):
+
+```ini
+Environment="CF_WORKER_VCPUS=1"
+Environment="CF_WORKER_MEMORY_MB=2048"
 ```
+
+Thala reads `CF_ACCOUNT_ID`, `CF_WORKER_IMAGE`, `CF_WORKER_VCPUS`, and
+`CF_WORKER_MEMORY_MB` automatically at startup — you do **not** need to set
+`cloudflare.account_id` or `cloudflare.image` in WORKFLOW.md unless you want to
+override per-workflow.
 
 Build and push `Dockerfile.worker` to a container registry accessible by Cloudflare before
 enabling this backend.
@@ -393,14 +488,27 @@ Environment="OPENROUTER_API_KEY=sk-or-xxxx"
 
 Generate `THALA_CALLBACK_SECRET` with: `openssl rand -hex 32`
 
+### OpenCode Zen backend (additional)
+
+```ini
+Environment="OPENCODE_API_KEY=sk-..."
+Environment="THALA_GITHUB_TOKEN=ghp_xxxxxxxxxxxx"
+Environment="THALA_CALLBACK_SECRET=<openssl rand -hex 32>"
+# Optional: override the Zen API base URL (e.g. for private deployments)
+# Environment="OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen/v1"
+```
+
 ### Cloudflare backend (additional)
 
 ```ini
 Environment="CF_ACCOUNT_ID=your-cloudflare-account-id"
 Environment="CF_API_TOKEN=your-cloudflare-api-token"
+Environment="CF_WORKER_IMAGE=registry.example.com/thala-worker:latest"
 Environment="THALA_GITHUB_TOKEN=ghp_xxxxxxxxxxxx"
-Environment="THALA_CALLBACK_SECRET=<random 32-byte hex>"
-Environment="OPENROUTER_API_KEY=sk-or-xxxx"
+Environment="THALA_CALLBACK_SECRET=<openssl rand -hex 32>"
+# Optional resource limits:
+# Environment="CF_WORKER_VCPUS=1"
+# Environment="CF_WORKER_MEMORY_MB=2048"
 ```
 
 ---
@@ -529,5 +637,7 @@ cat /path/to/your-app/.thala/active-tasks.json
 | Tasks not dispatched | `Status` not in `active_states` | Check `tracker.active_states` in WORKFLOW.md |
 | Tasks silently skipped | Missing `Acceptance Criteria` | Add acceptance criteria to the Beads description or Notion field |
 | Worker stalls immediately | `opencode` not on PATH | Run `which opencode`; re-run `dev/setup.sh` |
-| Callback never received (Modal) | Gateway not publicly reachable | Run `thala gateway tunnel cloudflare` |
+| Callback never received (Modal/Zen/CF) | Gateway not publicly reachable | Run `thala gateway tunnel cloudflare` |
+| `OPENCODE_API_KEY` not found | OpenCode Zen backend selected but key missing | Set `OPENCODE_API_KEY` in the systemd unit |
+| `CF_WORKER_IMAGE` empty | Cloudflare backend has no image to deploy | Set `CF_WORKER_IMAGE` env var or WORKFLOW.md field |
 | `NOTION_API_TOKEN` not found | Notion tracker selected but env var not in systemd unit | Add `Environment="NOTION_API_TOKEN=..."` to the service file |

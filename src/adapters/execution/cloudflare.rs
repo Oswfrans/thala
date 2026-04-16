@@ -44,12 +44,39 @@ pub struct CloudflareBackend {
     http: reqwest::Client,
 }
 
+impl CloudflareConfig {
+    /// Construct from environment variables.
+    ///
+    /// Reads:
+    ///   - `CF_ACCOUNT_ID`        — Cloudflare account ID
+    ///   - `CF_WORKER_IMAGE`      — Container image reference
+    ///   - `CF_WORKER_VCPUS`      — vCPU count (optional, integer)
+    ///   - `CF_WORKER_MEMORY_MB`  — Memory in MB (optional, integer)
+    pub fn from_env() -> Self {
+        Self {
+            account_id: std::env::var("CF_ACCOUNT_ID").unwrap_or_default(),
+            image: std::env::var("CF_WORKER_IMAGE").unwrap_or_default(),
+            vcpus: std::env::var("CF_WORKER_VCPUS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            memory_mb: std::env::var("CF_WORKER_MEMORY_MB")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+        }
+    }
+}
+
 impl CloudflareBackend {
     pub fn new(config: CloudflareConfig) -> Self {
         Self {
             config,
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Construct from environment variables (shorthand for `new(CloudflareConfig::from_env())`).
+    pub fn from_env() -> Self {
+        Self::new(CloudflareConfig::from_env())
     }
 
     fn account_id(&self) -> String {

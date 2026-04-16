@@ -155,9 +155,8 @@ impl SlackInteraction {
             resolved_by: format!("slack:{user_id}"),
         };
 
-        let payload = serde_json::to_string(&resolution).map_err(|e| {
-            ThalaError::interaction(format!("Failed to serialize resolution: {e}"))
-        })?;
+        let payload = serde_json::to_string(&resolution)
+            .map_err(|e| ThalaError::interaction(format!("Failed to serialize resolution: {e}")))?;
 
         self.db
             .lock()
@@ -253,18 +252,16 @@ impl InteractionLayer for SlackInteraction {
         // Collect all pending rows ordered by insertion sequence.
         let rows: Vec<(i64, String)> = {
             let mut stmt = conn
-                .prepare(
-                    "SELECT id, payload FROM slack_pending_resolutions ORDER BY id",
-                )
-                .map_err(|e| {
-                    ThalaError::interaction(format!("DB prepare failed: {e}"))
-                })?;
+                .prepare("SELECT id, payload FROM slack_pending_resolutions ORDER BY id")
+                .map_err(|e| ThalaError::interaction(format!("DB prepare failed: {e}")))?;
 
-            let collected: Vec<(i64, String)> =
-                stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
-                    .map_err(|e| ThalaError::interaction(format!("DB query failed: {e}")))?
-                    .filter_map(|r| r.ok())
-                    .collect();
+            let collected: Vec<(i64, String)> = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| ThalaError::interaction(format!("DB query failed: {e}")))?
+                .filter_map(Result::ok)
+                .collect();
             collected
         };
 
@@ -273,7 +270,7 @@ impl InteractionLayer for SlackInteraction {
         }
 
         // Delete everything up to and including the highest ID we just read.
-        let max_id = rows.last().map(|(id, _)| *id).unwrap_or(0);
+        let max_id = rows.last().map_or(0, |(id, _)| *id);
         conn.execute(
             "DELETE FROM slack_pending_resolutions WHERE id <= ?1",
             params![max_id],

@@ -8,6 +8,7 @@
 use thala::adapters::execution::cloudflare::{CloudflareBackend, CloudflareConfig};
 use thala::adapters::execution::local::LocalBackend;
 use thala::adapters::execution::modal::{ModalBackend, ModalConfig};
+use thala::adapters::execution::opencode_zen::{OpenCodeZenBackend, OpenCodeZenConfig};
 use thala::adapters::validation::noop::NoopValidator;
 use thala::adapters::validation::review_ai::ReviewAiValidator;
 use thala::core::ids::{RunId, TaskId};
@@ -133,6 +134,91 @@ async fn cloudflare_backend_cancel_handles_missing_container() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OpenCodeZenBackend tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn opencode_zen_backend_reports_correct_kind() {
+    let config = OpenCodeZenConfig {
+        base_url: "https://opencode.ai/zen/v1".into(),
+    };
+    let backend = OpenCodeZenBackend::new(config);
+    assert_eq!(backend.kind(), ExecutionBackendKind::OpenCodeZen);
+    assert!(!backend.is_local());
+    assert_eq!(backend.name(), "opencode-zen");
+}
+
+#[test]
+fn opencode_zen_config_from_env_uses_default_url() {
+    std::env::remove_var("OPENCODE_ZEN_BASE_URL");
+    let config = OpenCodeZenConfig::from_env();
+    assert_eq!(config.base_url, "https://opencode.ai/zen/v1");
+}
+
+#[test]
+fn opencode_zen_config_from_env_respects_override() {
+    std::env::set_var("OPENCODE_ZEN_BASE_URL", "https://custom.example.com/v1");
+    let config = OpenCodeZenConfig::from_env();
+    assert_eq!(config.base_url, "https://custom.example.com/v1");
+    std::env::remove_var("OPENCODE_ZEN_BASE_URL");
+}
+
+#[tokio::test]
+async fn opencode_zen_backend_observe_without_key_returns_gracefully() {
+    // Without a key the API call will fail; observe() should return is_alive=false
+    // rather than panicking.
+    std::env::remove_var("OPENCODE_API_KEY");
+    let backend = OpenCodeZenBackend::new(OpenCodeZenConfig {
+        base_url: "https://opencode.ai/zen/v1".into(),
+    });
+    let handle = WorkerHandle {
+        job_id: "oz-test123".into(),
+        backend: ExecutionBackendKind::OpenCodeZen,
+    };
+    // Should not panic — either returns Ok (failed lookup → deleted) or Err.
+    let _ = backend.observe(&handle).await;
+}
+
+#[tokio::test]
+async fn opencode_zen_backend_cancel_is_noop_without_credentials() {
+    std::env::remove_var("OPENCODE_API_KEY");
+    let backend = OpenCodeZenBackend::new(OpenCodeZenConfig::default());
+    let handle = WorkerHandle {
+        job_id: "oz-test456".into(),
+        backend: ExecutionBackendKind::OpenCodeZen,
+    };
+    // cancel() silently swallows the error — always returns Ok.
+    let result = backend.cancel(&handle).await;
+    assert!(result.is_ok());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CloudflareConfig::from_env tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cloudflare_config_from_env_reads_account_id() {
+    std::env::set_var("CF_ACCOUNT_ID", "test-account-123");
+    std::env::set_var("CF_WORKER_IMAGE", "registry.example.com/worker:latest");
+    let config = CloudflareConfig::from_env();
+    assert_eq!(config.account_id, "test-account-123");
+    assert_eq!(config.image, "registry.example.com/worker:latest");
+    std::env::remove_var("CF_ACCOUNT_ID");
+    std::env::remove_var("CF_WORKER_IMAGE");
+}
+
+#[test]
+fn cloudflare_config_from_env_parses_resource_limits() {
+    std::env::set_var("CF_WORKER_VCPUS", "2");
+    std::env::set_var("CF_WORKER_MEMORY_MB", "1024");
+    let config = CloudflareConfig::from_env();
+    assert_eq!(config.vcpus, Some(2));
+    assert_eq!(config.memory_mb, Some(1024));
+    std::env::remove_var("CF_WORKER_VCPUS");
+    std::env::remove_var("CF_WORKER_MEMORY_MB");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // NoopValidator tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -156,6 +242,9 @@ async fn noop_validator_always_passes() {
 // ─────────────────────────────────────────────────────────────────────────────
 // ReviewAiValidator stub tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Mutex to prevent parallel mutation of ANTHROPIC_API_KEY between tests.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn review_ai_validator_reports_correct_kind() {
@@ -186,6 +275,8 @@ async fn review_ai_validator_invalid_key_returns_error() {
 
 #[test]
 fn review_ai_validator_from_env_requires_api_key() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
     // Save current env var state
     let original = std::env::var("ANTHROPIC_API_KEY").ok();
 
@@ -204,6 +295,8 @@ fn review_ai_validator_from_env_requires_api_key() {
 
 #[test]
 fn review_ai_validator_from_env_succeeds_with_key() {
+    let _guard = ENV_LOCK.lock().unwrap();
+
     // Set a fake API key
     std::env::set_var("ANTHROPIC_API_KEY", "test-key-12345");
 

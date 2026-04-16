@@ -1,8 +1,9 @@
 //! DefaultBackendRouter — routes tasks to the configured execution backend.
 //!
 //! The default router reads the configured backend from WorkflowConfig.
-//! All three backends (Local, Modal, Cloudflare) are registered at construction
-//! time so routing decisions can be made at runtime without reconstruction.
+//! All four backends (Local, Modal, Cloudflare, OpenCodeZen) are registered at
+//! construction time so routing decisions can be made at runtime without
+//! reconstruction.
 //!
 //! The router also handles reroute decisions for retries.
 
@@ -20,6 +21,7 @@ pub struct DefaultBackendRouter {
     local: Arc<dyn ExecutionBackend>,
     modal: Arc<dyn ExecutionBackend>,
     cloudflare: Arc<dyn ExecutionBackend>,
+    opencode_zen: Arc<dyn ExecutionBackend>,
 }
 
 impl DefaultBackendRouter {
@@ -27,11 +29,13 @@ impl DefaultBackendRouter {
         local: Arc<dyn ExecutionBackend>,
         modal: Arc<dyn ExecutionBackend>,
         cloudflare: Arc<dyn ExecutionBackend>,
+        opencode_zen: Arc<dyn ExecutionBackend>,
     ) -> Self {
         Self {
             local,
             modal,
             cloudflare,
+            opencode_zen,
         }
     }
 }
@@ -47,15 +51,17 @@ impl BackendRouter for DefaultBackendRouter {
         // the workflow default, allowing per-task backend selection.
         //
         // Examples:
-        //   labels: ["backend:modal"]      → routes to Modal
-        //   labels: ["backend:cloudflare"] → routes to Cloudflare
-        //   labels: ["backend:local"]      → routes to Local
+        //   labels: ["backend:modal"]        → routes to Modal
+        //   labels: ["backend:cloudflare"]   → routes to Cloudflare
+        //   labels: ["backend:local"]        → routes to Local
+        //   labels: ["backend:opencode-zen"] → routes to OpenCode Zen
         for label in &spec.labels {
             if let Some(backend_name) = label.strip_prefix("backend:") {
                 let kind = match backend_name.to_lowercase().as_str() {
                     "modal" => ExecutionBackendKind::Modal,
                     "cloudflare" | "cf" => ExecutionBackendKind::Cloudflare,
                     "local" => ExecutionBackendKind::Local,
+                    "opencode-zen" | "zen" | "opencodezen" => ExecutionBackendKind::OpenCodeZen,
                     other => {
                         tracing::warn!(
                             task_id = %spec.id.as_str(),
@@ -83,6 +89,7 @@ impl BackendRouter for DefaultBackendRouter {
             ExecutionBackendKind::Local => self.local.clone(),
             ExecutionBackendKind::Modal => self.modal.clone(),
             ExecutionBackendKind::Cloudflare => self.cloudflare.clone(),
+            ExecutionBackendKind::OpenCodeZen => self.opencode_zen.clone(),
         }
     }
 
@@ -108,12 +115,12 @@ impl BackendRouter for DefaultBackendRouter {
             }
         }
 
-        // Default fallback: Local → Modal, remote → Local.
+        // Default fallback: Local → OpenCodeZen, remote → Local.
         match failed_backend {
-            ExecutionBackendKind::Local => Some(ExecutionBackendKind::Modal),
-            ExecutionBackendKind::Modal | ExecutionBackendKind::Cloudflare => {
-                Some(ExecutionBackendKind::Local)
-            }
+            ExecutionBackendKind::Local => Some(ExecutionBackendKind::OpenCodeZen),
+            ExecutionBackendKind::Modal
+            | ExecutionBackendKind::Cloudflare
+            | ExecutionBackendKind::OpenCodeZen => Some(ExecutionBackendKind::Local),
         }
     }
 }

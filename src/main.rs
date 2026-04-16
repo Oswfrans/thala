@@ -12,7 +12,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 use thala::adapters::beads::{BeadsTaskSink, BeadsTaskSource};
 use thala::adapters::execution::router::DefaultBackendRouter;
 use thala::adapters::execution::{
-    CloudflareBackend, CloudflareConfig, LocalBackend, ModalBackend, ModalConfig,
+    CloudflareBackend, LocalBackend, ModalBackend, ModalConfig, OpenCodeZenBackend,
+    OpenCodeZenConfig,
 };
 use thala::adapters::interaction::discord::{DiscordInteraction, DiscordInteractionConfig};
 use thala::adapters::interaction::slack::{SlackInteraction, SlackInteractionConfig};
@@ -55,6 +56,8 @@ enum Command {
     Run,
     /// Validate WORKFLOW.md without starting the engine
     Validate,
+    /// Interactive setup wizard — generates WORKFLOW.md and config.toml
+    Onboard,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -89,6 +92,9 @@ async fn main() -> Result<()> {
             println!("WORKFLOW.md is valid.");
             return Ok(());
         }
+        Command::Onboard => {
+            return run_onboard();
+        }
         Command::Run => {}
     }
 
@@ -103,8 +109,14 @@ async fn main() -> Result<()> {
     // Execution backends
     let local = Arc::new(LocalBackend::new());
     let modal = Arc::new(ModalBackend::new(ModalConfig::default()));
-    let cloudflare = Arc::new(CloudflareBackend::new(CloudflareConfig::default()));
-    let router = Arc::new(DefaultBackendRouter::new(local, modal, cloudflare));
+    let cloudflare = Arc::new(CloudflareBackend::from_env());
+    let opencode_zen = Arc::new(OpenCodeZenBackend::new(OpenCodeZenConfig::from_env()));
+    let router = Arc::new(DefaultBackendRouter::new(
+        local,
+        modal,
+        cloudflare,
+        opencode_zen,
+    ));
 
     // Data directory — used by both the state store and the Slack inbox.
     let state_dir = std::env::var("XDG_DATA_HOME")
@@ -200,6 +212,270 @@ async fn main() -> Result<()> {
     .run()
     .await
     .context("Orchestration engine failed")?;
+
+    Ok(())
+}
+
+// ── Onboarding wizard ─────────────────────────────────────────────────────────
+
+fn run_onboard() -> Result<()> {
+    use std::io::{self, Write};
+
+    fn prompt(label: &str, default: &str) -> String {
+        let hint = if default.is_empty() {
+            String::new()
+        } else {
+            format!(" [{default}]")
+        };
+        print!("{label}{hint}: ");
+        io::stdout().flush().ok();
+        let mut buf = String::new();
+        io::stdin().read_line(&mut buf).ok();
+        let trimmed = buf.trim().to_string();
+        if trimmed.is_empty() {
+            default.to_string()
+        } else {
+            trimmed
+        }
+    }
+
+    fn choose(label: &str, options: &[&str]) -> usize {
+        println!("{label}");
+        for (i, opt) in options.iter().enumerate() {
+            println!("  {}. {opt}", i + 1);
+        }
+        loop {
+            print!("Choice [1]: ");
+            io::stdout().flush().ok();
+            let mut buf = String::new();
+            io::stdin().read_line(&mut buf).ok();
+            let s = buf.trim();
+            if s.is_empty() {
+                return 0;
+            }
+            if let Ok(n) = s.parse::<usize>() {
+                if n >= 1 && n <= options.len() {
+                    return n - 1;
+                }
+            }
+            println!("Please enter a number between 1 and {}.", options.len());
+        }
+    }
+
+    println!();
+    println!("╔══════════════════════════════════════════╗");
+    println!("║         Thala Onboarding Wizard          ║");
+    println!("╚══════════════════════════════════════════╝");
+    println!();
+    println!("This wizard generates a WORKFLOW.md for your product repo.");
+    println!("Press Enter to accept defaults shown in [brackets].");
+    println!();
+
+    // Product info
+    let product = prompt("Product slug (e.g. my-app)", "my-app");
+    let workspace_root = prompt(
+        "Absolute path to the product workspace",
+        "/workspaces/my-app",
+    );
+    let github_repo = prompt("GitHub repo slug (e.g. org/repo)", "");
+
+    // Tracker
+    let tracker_idx = choose(
+        "Which task tracker?",
+        &["Beads (default, no API key needed)", "Notion"],
+    );
+    let (tracker_backend, notion_fields) = if tracker_idx == 0 {
+        ("beads".to_string(), String::new())
+    } else {
+        let db_id = prompt("Notion database ID", "");
+        let api_key_note = "  # Set NOTION_API_TOKEN env var — do not put it here";
+        (
+            "notion".to_string(),
+            format!("\n  database_id: {db_id}{api_key_note}"),
+        )
+    };
+
+    // Execution backend
+    let backend_idx = choose(
+        "Which execution backend?",
+        &[
+            "local   — tmux sessions on this host (no extra credentials)",
+            "opencode-zen — OpenCode Zen managed workers (OPENCODE_API_KEY)",
+            "cloudflare   — Cloudflare Containers (CF_ACCOUNT_ID, CF_API_TOKEN, CF_WORKER_IMAGE)",
+            "modal        — Modal serverless containers (modal CLI)",
+        ],
+    );
+    let backend_names = ["local", "opencode-zen", "cloudflare", "modal"];
+    let backend = backend_names[backend_idx];
+
+    let (backend_block, env_note) = match backend {
+        "opencode-zen" => {
+            let cb = prompt(
+                "Callback base URL (public URL of this Thala instance)",
+                "https://thala.example.com",
+            );
+            (
+                format!(
+                    "\nexecution:\n  backend: opencode-zen\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
+                ),
+                "\nRequired env vars:\n  OPENCODE_API_KEY=sk-...\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)",
+            )
+        }
+        "cloudflare" => {
+            let cb = prompt(
+                "Callback base URL (public URL of this Thala instance)",
+                "https://thala.example.com",
+            );
+            (
+                format!(
+                    "\nexecution:\n  backend: Cloudflare\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
+                ),
+                "\nRequired env vars:\n  CF_ACCOUNT_ID=...\n  CF_API_TOKEN=...\n  CF_WORKER_IMAGE=registry.example.com/thala-worker:latest\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)",
+            )
+        }
+        "modal" => {
+            let cb = prompt(
+                "Callback base URL (public URL of this Thala instance)",
+                "https://thala.example.com",
+            );
+            (
+                format!(
+                    "\nexecution:\n  backend: Modal\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
+                ),
+                "\nRequired env vars:\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)\n  (also: pip install modal && modal setup)",
+            )
+        }
+        _ => (String::new(), ""), // local — no extra env vars
+    };
+
+    // Models
+    let worker_model = prompt("Worker model", "opencode/kimi-k2.5");
+    let manager_model = prompt("Manager model (review AI)", "anthropic/claude-opus-4-6");
+
+    // Notifications
+    let discord_token = prompt("Discord bot token (leave blank to skip)", "");
+    let discord_channel = if !discord_token.is_empty() {
+        prompt("Discord alerts channel ID", "")
+    } else {
+        String::new()
+    };
+    let discord_block = if !discord_token.is_empty() && !discord_channel.is_empty() {
+        format!(
+            "\ndiscord:\n  bot_token: \"{discord_token}\"  # move to env var for production\n  public_key: \"\"  # fill in from Discord developer portal\n  alerts_channel_id: \"{discord_channel}\""
+        )
+    } else {
+        String::new()
+    };
+
+    // Generate WORKFLOW.md
+    let tracker_block = if tracker_backend == "beads" {
+        format!(
+            "tracker:\n  backend: beads\n  active_states: [\"open\"]\n  terminal_states: [\"Done\", \"Cancelled\"]\n  beads_workspace_root: {workspace_root}\n  beads_ready_status: open"
+        )
+    } else {
+        format!(
+            "tracker:\n  backend: notion\n  active_states: [\"Ready\"]\n  terminal_states: [\"Done\", \"Cancelled\"]{notion_fields}"
+        )
+    };
+
+    let workflow_md = format!(
+        r#"---
+product: "{product}"
+github_repo: "{github_repo}"
+
+{tracker_block}
+{backend_block}
+
+models:
+  worker: "{worker_model}"
+  manager: "{manager_model}"
+  max_review_cycles: 2
+
+workspace:
+  root: {workspace_root}
+
+hooks:
+  before_run: "git pull --rebase --autostash origin main"
+  after_run: ""
+  before_cleanup: ""
+
+limits:
+  max_concurrent_runs: 3
+  stall_timeout_ms: 1800000
+
+retry:
+  max_attempts: 3
+  allow_backend_reroute: false
+
+merge:
+  auto_merge: false
+  protected_paths:
+    - "auth/**"
+    - "billing/**"
+    - "infra/**"
+    - "**/migrations/**"
+    - ".github/workflows/**"
+{discord_block}
+---
+
+You are an expert developer working on **{product}**.
+
+## Task
+
+**ID:** {{{{ issue.identifier }}}}
+**Title:** {{{{ issue.title }}}}
+**Attempt:** {{{{ issue.attempt }}}}
+
+## Acceptance Criteria
+
+{{{{ issue.acceptance_criteria }}}}
+
+{{%- if issue.context %}}
+## Context
+
+{{{{ issue.context }}}}
+{{%- endif %}}
+
+When complete, write `DONE` to `.thala/signals/{{{{ issue.identifier }}}}.signal`.
+"#,
+    );
+
+    let out_path = format!("{workspace_root}/WORKFLOW.md");
+    println!();
+    println!("─── Generated WORKFLOW.md preview ───────────────────────────────────────");
+    println!("{workflow_md}");
+    println!("─────────────────────────────────────────────────────────────────────────");
+
+    print!("Write to {out_path}? [y/N]: ");
+    io::stdout().flush().ok();
+    let mut confirm = String::new();
+    io::stdin().read_line(&mut confirm).ok();
+    if confirm.trim().to_lowercase() == "y" {
+        if let Some(parent) = std::path::Path::new(&out_path).parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(&out_path, &workflow_md)
+            .with_context(|| format!("Failed to write {out_path}"))?;
+        println!("✓ Written to {out_path}");
+    } else {
+        println!("Skipped write. Copy the preview above manually.");
+    }
+
+    if !env_note.is_empty() {
+        println!();
+        println!("─── Environment variables needed ─────────────────────────────────────────");
+        println!("{env_note}");
+        println!("─────────────────────────────────────────────────────────────────────────");
+        println!("Set these in your systemd unit or shell environment before starting Thala.");
+    }
+
+    println!();
+    println!("Next steps:");
+    println!("  1. Review / edit {out_path}");
+    println!("  2. cargo build --release");
+    println!("  3. ./target/release/thala validate --workflow {out_path}");
+    println!("  4. ./target/release/thala run --workflow {out_path}");
+    println!();
 
     Ok(())
 }
