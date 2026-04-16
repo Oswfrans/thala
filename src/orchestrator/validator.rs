@@ -1,0 +1,441 @@
+//! Validator coordinator — runs validators and drives post-validation transitions.
+//!
+//! Consumes RunCompleted events and coordinates the validation pipeline:
+//!   1. Run ReviewAi validator against the diff.
+//!   2. If review passes: create PR → task enters Validating.
+//!   3. If review fails: inject feedback, check retry budget, re-dispatch or fail.
+//!   4. Once PR exists: CiValidator polls for check status.
+//!   5. On CI pass + auto_merge enabled: trigger merge.
+//!   6. On CI pass + human required: emit InteractionRequest (ApprovalRequired).
+//!   7. On PR merged: transition task to Succeeded, write back to Beads.
+
+use std::sync::Arc;
+
+use crate::core::events::OrchestratorEvent;
+use crate::core::ids::{RunId, TaskId};
+use crate::core::interaction::{InteractionAction, InteractionRequest, InteractionRequestKind};
+use crate::core::run::TaskRun;
+use crate::core::transitions::{apply_transition, Transition};
+use crate::core::workflow::WorkflowConfig;
+use crate::ports::interaction::InteractionLayer;
+use crate::ports::repo::{CiStatus, RepoProvider};
+use crate::ports::state_store::StateStore;
+use crate::ports::task_sink::TaskSink;
+use crate::ports::validator::Validator;
+
+// ── ValidatorCoordinator ──────────────────────────────────────────────────────
+
+pub struct ValidatorCoordinator {
+    workflow: WorkflowConfig,
+    review_ai: Arc<dyn Validator>,
+    repo: Arc<dyn RepoProvider>,
+    store: Arc<dyn StateStore>,
+    sink: Arc<dyn TaskSink>,
+    interaction_layers: Vec<Arc<dyn InteractionLayer>>,
+    events_tx: tokio::sync::mpsc::Sender<OrchestratorEvent>,
+}
+
+impl ValidatorCoordinator {
+    pub fn new(
+        workflow: WorkflowConfig,
+        review_ai: Arc<dyn Validator>,
+        repo: Arc<dyn RepoProvider>,
+        store: Arc<dyn StateStore>,
+        sink: Arc<dyn TaskSink>,
+        interaction_layers: Vec<Arc<dyn InteractionLayer>>,
+        events_tx: tokio::sync::mpsc::Sender<OrchestratorEvent>,
+    ) -> Self {
+        Self {
+            workflow,
+            review_ai,
+            repo,
+            store,
+            sink,
+            interaction_layers,
+            events_tx,
+        }
+    }
+
+    /// Handle a RunCompleted event — run review AI and progress the pipeline.
+    pub async fn handle_run_completed(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> anyhow::Result<()> {
+        let Some(run) = self.store.get_run(run_id).await? else {
+            tracing::warn!(run_id = %run_id, "Run not found for validation");
+            return Ok(());
+        };
+
+        let Some(mut record) = self.store.get_task(task_id).await? else {
+            tracing::warn!(task_id = %task_id, "Task not found for validation");
+            return Ok(());
+        };
+
+        // Step 1: Review AI.
+        let review_outcome = self.review_ai.validate(&run).await?;
+
+        let _ = self
+            .events_tx
+            .send(OrchestratorEvent::ValidationResult {
+                task_id: task_id.clone(),
+                run_id: run_id.clone(),
+                outcome: review_outcome.clone(),
+                at: chrono::Utc::now(),
+            })
+            .await;
+
+        if !review_outcome.passed {
+            return self
+                .handle_review_failure(&run, &mut record, review_outcome.detail.as_deref())
+                .await;
+        }
+
+        // Step 2: Create PR.
+        let pr_title = format!("[Thala] {} — {}", record.spec.id, record.spec.title);
+        let pr_body = format!(
+            "Automated by Thala\n\n**Acceptance Criteria:**\n{}\n\n**Review AI:** ✅",
+            record.spec.acceptance_criteria
+        );
+
+        let branch = run
+            .remote_branch
+            .clone()
+            .or_else(|| {
+                run.worktree_path
+                    .as_ref()
+                    .map(|_| format!("task/{}", task_id.as_str()))
+            })
+            .unwrap_or_else(|| format!("task/{}", task_id.as_str()));
+
+        let (pr_number, pr_url) = self.repo.create_pr(&branch, &pr_title, &pr_body).await?;
+
+        // Update run with PR info.
+        let mut updated_run = run.clone();
+        updated_run.pr_number = Some(pr_number);
+        updated_run.pr_url = Some(pr_url.clone());
+        self.store.upsert_run(&updated_run).await?;
+
+        // Transition task to Validating.
+        record = apply_transition(&record, Transition::RunCompleted)?;
+        self.store.upsert_task(&record).await?;
+
+        tracing::info!(
+            task_id = %task_id,
+            pr_number,
+            pr_url = %pr_url,
+            "PR created, entering CI validation"
+        );
+
+        // Step 3: Check if human approval is required before merge.
+        if record.spec.always_human_review || !self.workflow.merge.auto_merge {
+            self.request_approval(task_id, run_id, pr_number, &pr_url)
+                .await?;
+        }
+        // Otherwise, auto-merge will be triggered by the monitor once CI passes.
+
+        Ok(())
+    }
+
+    /// Check CI status for a Validating task and advance if ready.
+    pub async fn check_ci(&self, task_id: &TaskId, run_id: &RunId) -> anyhow::Result<()> {
+        let Some(run) = self.store.get_run(run_id).await? else {
+            return Ok(());
+        };
+
+        let Some(pr_number) = run.pr_number else {
+            return Ok(());
+        };
+
+        let ci_status = self.repo.pr_ci_status(pr_number).await?;
+
+        // Get the diff to check protected paths (local backend only).
+        let diff = if let Some(wt_path) = &run.worktree_path {
+            self.repo
+                .get_diff(std::path::Path::new(wt_path))
+                .await
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        match ci_status {
+            CiStatus::Passing => {
+                tracing::info!(task_id = %task_id, pr_number, "CI passing");
+
+                if self.workflow.merge.auto_merge
+                    && !record_requires_human_approval(&run, &self.workflow, &diff)
+                {
+                    self.trigger_merge(task_id, run_id, pr_number).await?;
+                } else {
+                    // Auto-merge blocked by policy or protected paths — request human approval.
+                    if let Some(pr_url) = run.pr_url.as_deref() {
+                        self.request_approval(task_id, run_id, pr_number, pr_url)
+                            .await?;
+                    }
+                }
+            }
+            CiStatus::Failing { ref failing_checks } => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    pr_number,
+                    ?failing_checks,
+                    "CI failing"
+                );
+
+                // Check retry budget.
+                let Some(record) = self.store.get_task(task_id).await? else {
+                    return Ok(());
+                };
+
+                if record.attempt < self.workflow.retry.max_attempts {
+                    tracing::info!(
+                        task_id = %task_id,
+                        attempt = record.attempt,
+                        max = self.workflow.retry.max_attempts,
+                        "CI failing — re-dispatching within retry budget"
+                    );
+                    let updated = crate::core::transitions::apply_transition(
+                        &record,
+                        crate::core::transitions::Transition::ValidationFailedRetry {
+                            reason: format!("CI failing: {}", failing_checks.join(", ")),
+                        },
+                    )?;
+                    self.store.upsert_task(&updated).await?;
+                } else {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        attempt = record.attempt,
+                        "CI failing — max retries exceeded, marking failed"
+                    );
+                    let updated = crate::core::transitions::apply_transition(
+                        &record,
+                        crate::core::transitions::Transition::ValidationFailedTerminal {
+                            reason: format!(
+                                "CI failing after {} attempts: {}",
+                                record.attempt,
+                                failing_checks.join(", ")
+                            ),
+                        },
+                    )?;
+                    self.store.upsert_task(&updated).await?;
+
+                    if let Err(e) = self
+                        .sink
+                        .mark_stuck(
+                            task_id.as_str(),
+                            &format!(
+                                "CI failing after max retries: {}",
+                                failing_checks.join(", ")
+                            ),
+                        )
+                        .await
+                    {
+                        tracing::warn!(task_id = %task_id, "Failed to mark task stuck in Beads: {e}");
+                    }
+                }
+            }
+            CiStatus::Pending | CiStatus::Unknown => {
+                tracing::debug!(task_id = %task_id, pr_number, "CI pending");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check whether a PR has been merged and advance the task to Succeeded.
+    pub async fn check_pr_merged(&self, task_id: &TaskId, run_id: &RunId) -> anyhow::Result<()> {
+        let Some(run) = self.store.get_run(run_id).await? else {
+            return Ok(());
+        };
+
+        let Some(pr_number) = run.pr_number else {
+            return Ok(());
+        };
+
+        if self.repo.pr_is_merged(pr_number).await? {
+            tracing::info!(task_id = %task_id, pr_number, "PR merged — task succeeded");
+            self.complete_task(task_id, pr_number).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_review_failure(
+        &self,
+        run: &TaskRun,
+        record: &mut crate::core::task::TaskRecord,
+        feedback: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let max_cycles = self.workflow.models.max_review_cycles;
+
+        if run.review_cycle >= max_cycles {
+            tracing::warn!(
+                task_id = %record.spec.id,
+                review_cycle = run.review_cycle,
+                max_cycles,
+                "Max review cycles reached — marking failed"
+            );
+            *record = apply_transition(
+                record,
+                Transition::ValidationFailedTerminal {
+                    reason: format!("Max review cycles ({max_cycles}) reached without approval"),
+                },
+            )?;
+            self.store.upsert_task(record).await?;
+        } else {
+            tracing::info!(
+                task_id = %record.spec.id,
+                review_cycle = run.review_cycle,
+                "Review rejected — injecting feedback and re-dispatching"
+            );
+            // Store feedback in the run record for the next dispatcher pick-up.
+            let mut updated_run = run.clone();
+            updated_run.review_feedback = feedback.map(ToString::to_string);
+            updated_run.review_cycle += 1;
+            self.store.upsert_run(&updated_run).await?;
+
+            *record = apply_transition(
+                record,
+                Transition::ValidationFailedRetry {
+                    reason: feedback.unwrap_or("Review rejected").to_string(),
+                },
+            )?;
+            self.store.upsert_task(record).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn request_approval(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        pr_number: u32,
+        pr_url: &str,
+    ) -> anyhow::Result<()> {
+        let Some(record) = self.store.get_task(task_id).await? else {
+            return Ok(());
+        };
+
+        let req = InteractionRequest::new(
+            task_id.clone(),
+            run_id.clone(),
+            InteractionRequestKind::ApprovalRequired {
+                pr_url: pr_url.to_string(),
+                pr_number,
+            },
+            format!(
+                "Approval required: {} — {}",
+                record.spec.id, record.spec.title
+            ),
+            format!(
+                "PR #{pr_number} is ready for review.\n\nAcceptance Criteria:\n{}",
+                record.spec.acceptance_criteria
+            ),
+            vec![InteractionAction::Approve, InteractionAction::Reject],
+        );
+
+        let ticket = crate::core::interaction::InteractionTicket::new(req.clone());
+        self.store.save_ticket(&ticket).await?;
+
+        for layer in &self.interaction_layers {
+            if let Err(e) = layer.send(&req).await {
+                tracing::warn!(
+                    channel = layer.name(),
+                    "Failed to send approval request: {e}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn trigger_merge(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+        pr_number: u32,
+    ) -> anyhow::Result<()> {
+        // Hard rule: "thala-core" product never auto-merges.
+        if self.workflow.product == "thala-core" {
+            tracing::info!(
+                task_id = %task_id,
+                "thala-core product — auto-merge blocked by hard rule"
+            );
+            self.request_approval(task_id, run_id, pr_number, "")
+                .await?;
+            return Ok(());
+        }
+
+        tracing::info!(task_id = %task_id, pr_number, "Triggering auto-merge");
+        self.repo.merge_pr(pr_number).await?;
+        self.complete_task(task_id, pr_number).await?;
+        Ok(())
+    }
+
+    async fn complete_task(&self, task_id: &TaskId, pr_number: u32) -> anyhow::Result<()> {
+        if let Some(mut record) = self.store.get_task(task_id).await? {
+            record = apply_transition(&record, Transition::ValidationPassed)?;
+            self.store.upsert_task(&record).await?;
+        }
+
+        if let Err(e) = self.sink.mark_done(task_id.as_str(), pr_number).await {
+            tracing::warn!(task_id = %task_id, "Failed to write done back to Beads: {e}");
+        }
+
+        let _ = self
+            .events_tx
+            .send(OrchestratorEvent::TaskSyncedToBeads {
+                task_id: task_id.clone(),
+                beads_status: "closed".into(),
+                at: chrono::Utc::now(),
+            })
+            .await;
+
+        Ok(())
+    }
+}
+
+fn record_requires_human_approval(run: &TaskRun, workflow: &WorkflowConfig, diff: &str) -> bool {
+    if run.review_cycle > 0 || !workflow.merge.auto_merge {
+        return true;
+    }
+
+    // Block auto-merge when any protected path was touched by this diff.
+    if !workflow.merge.protected_paths.is_empty()
+        && diff_touches_protected_path(diff, &workflow.merge.protected_paths)
+    {
+        tracing::info!(
+            run_id = %run.run_id,
+            "Diff touches a protected path — human approval required"
+        );
+        return true;
+    }
+
+    false
+}
+
+/// Return true if the git diff output contains changes to any of the given path prefixes.
+///
+/// Matches against `+++ b/<path>` and `--- a/<path>` lines in the diff output.
+fn diff_touches_protected_path(diff: &str, patterns: &[String]) -> bool {
+    for line in diff.lines() {
+        let file_path = if let Some(rest) = line.strip_prefix("+++ b/") {
+            rest
+        } else if let Some(rest) = line.strip_prefix("--- a/") {
+            rest
+        } else {
+            continue;
+        };
+
+        for pattern in patterns {
+            // Treat the protected path as a prefix so "src/security" matches
+            // both "src/security/mod.rs" and "src/security/policy.rs".
+            if file_path.starts_with(pattern.as_str()) || file_path == pattern.as_str() {
+                return true;
+            }
+        }
+    }
+    false
+}

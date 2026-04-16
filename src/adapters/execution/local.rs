@@ -1,0 +1,203 @@
+//! LocalBackend — tmux sessions + git worktrees on the Thala host.
+//!
+//! How it works:
+//!   1. `launch()` creates a git worktree, writes a prompt file, runs before_run hook,
+//!      then spawns an opencode session in a new tmux window.
+//!   2. `observe()` runs `tmux capture-pane` and hashes the output for stall detection.
+//!   3. `cancel()` kills the tmux session.
+//!   4. `cleanup()` kills the session, removes the worktree, runs before_cleanup hook.
+//!
+//! Runtime state that must be persisted (stored in TaskRun):
+//!   - job_handle.job_id: tmux session name (e.g. "thala-example-app-bd-a1b2")
+//!   - worktree_path: absolute path to the local worktree
+
+use std::path::{Path, PathBuf};
+
+use async_trait::async_trait;
+use sha2::{Digest, Sha256};
+
+use crate::core::error::ThalaError;
+use crate::core::run::{ExecutionBackendKind, RunObservation, WorkerHandle};
+use crate::ports::execution::{ExecutionBackend, LaunchRequest, LaunchedRun};
+
+// ── LocalBackend ──────────────────────────────────────────────────────────────
+
+pub struct LocalBackend;
+
+impl Default for LocalBackend {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl LocalBackend {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn session_name(task_id: &str, product: &str) -> String {
+        let slug = task_id.replace(['/', ':'], "-");
+        format!("thala-{product}-{slug}")
+    }
+
+    fn worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
+        let slug = task_id.replace(['/', ':'], "-");
+        workspace_root.join(format!(".thala-worktrees/{slug}"))
+    }
+}
+
+#[async_trait]
+impl ExecutionBackend for LocalBackend {
+    fn kind(&self) -> ExecutionBackendKind {
+        ExecutionBackendKind::Local
+    }
+
+    fn is_local(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &'static str {
+        "local"
+    }
+
+    async fn launch(&self, req: LaunchRequest) -> Result<LaunchedRun, ThalaError> {
+        let session = Self::session_name(&req.task_id, &req.product);
+        let worktree = Self::worktree_path(&req.workspace_root, &req.task_id);
+
+        // Create git worktree.
+        let branch = format!("task/{}", req.task_id);
+        tokio::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                worktree.to_str().unwrap_or("."),
+                "HEAD",
+            ])
+            .current_dir(&req.workspace_root)
+            .output()
+            .await
+            .map_err(|e| ThalaError::backend("local", format!("git worktree add failed: {e}")))?;
+
+        // Write prompt file.
+        let prompt_path = worktree.join("THALA_PROMPT.md");
+        tokio::fs::write(&prompt_path, &req.prompt)
+            .await
+            .map_err(|e| ThalaError::backend("local", format!("Failed to write prompt: {e}")))?;
+
+        // Spawn opencode in a new tmux session.
+        // `tmux new-session -d -s {name} -c {worktree} opencode {model}`
+        let status = tokio::process::Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &session,
+                "-c",
+                worktree.to_str().unwrap_or("."),
+                "opencode",
+                "--model",
+                &req.model,
+            ])
+            .status()
+            .await
+            .map_err(|e| ThalaError::backend("local", format!("tmux new-session failed: {e}")))?;
+
+        if !status.success() {
+            return Err(ThalaError::backend(
+                "local",
+                format!("tmux new-session exited with {status}"),
+            ));
+        }
+
+        tracing::info!(
+            task_id = %req.task_id,
+            session = %session,
+            worktree = %worktree.display(),
+            "Local worker spawned"
+        );
+
+        Ok(LaunchedRun {
+            handle: WorkerHandle {
+                job_id: session,
+                backend: ExecutionBackendKind::Local,
+            },
+            worktree_path: Some(worktree),
+            remote_branch: None,
+        })
+    }
+
+    async fn observe(&self, handle: &WorkerHandle) -> Result<RunObservation, ThalaError> {
+        // Check if the tmux session exists.
+        let session_check = tokio::process::Command::new("tmux")
+            .args(["has-session", "-t", &handle.job_id])
+            .status()
+            .await
+            .map_err(|e| ThalaError::backend("local", format!("tmux has-session failed: {e}")))?;
+
+        let is_alive = session_check.success();
+
+        if !is_alive {
+            return Ok(RunObservation {
+                cursor: "dead".into(),
+                is_alive: false,
+                observed_at: chrono::Utc::now(),
+            });
+        }
+
+        // Capture the last 50 lines of the pane.
+        let output = tokio::process::Command::new("tmux")
+            .args(["capture-pane", "-p", "-t", &handle.job_id])
+            .output()
+            .await
+            .map_err(|e| ThalaError::backend("local", format!("tmux capture-pane failed: {e}")))?;
+
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+
+        // Hash the output — cursor changes when content changes.
+        let cursor = hex::encode(Sha256::digest(text.as_bytes()));
+
+        Ok(RunObservation {
+            cursor,
+            is_alive: true,
+            observed_at: chrono::Utc::now(),
+        })
+    }
+
+    async fn cancel(&self, handle: &WorkerHandle) -> Result<(), ThalaError> {
+        let _ = tokio::process::Command::new("tmux")
+            .args(["kill-session", "-t", &handle.job_id])
+            .status()
+            .await;
+        Ok(())
+    }
+
+    async fn cleanup(
+        &self,
+        handle: &WorkerHandle,
+        workspace_root: &Path,
+        task_id: &str,
+    ) -> Result<(), ThalaError> {
+        // Kill session.
+        self.cancel(handle).await?;
+
+        // Remove worktree.
+        let worktree = Self::worktree_path(workspace_root, task_id);
+        if worktree.exists() {
+            let _ = tokio::process::Command::new("git")
+                .args([
+                    "worktree",
+                    "remove",
+                    "--force",
+                    worktree.to_str().unwrap_or("."),
+                ])
+                .current_dir(workspace_root)
+                .status()
+                .await;
+        }
+
+        tracing::info!(task_id, "Local backend cleanup complete");
+        Ok(())
+    }
+}

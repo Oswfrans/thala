@@ -1,0 +1,32 @@
+# Default owners for all files
+* @oswfrans @oswin-mako
+
+# Important functional modules
+/src/agent/** @oswfrans @oswin-mako
+/src/providers/** @oswfrans @oswin-mako
+/src/channels/** @oswfrans @oswin-mako
+/src/tools/** @oswfrans @oswin-mako
+/src/gateway/** @oswfrans @oswin-mako
+/src/runtime/** @oswfrans @oswin-mako
+/src/memory/** @oswfrans @oswin-mako
+/Cargo.toml @oswfrans @oswin-mako
+/Cargo.lock @oswfrans @oswin-mako
+
+# Security / tests / CI-CD ownership
+/src/security/** @oswfrans @oswin-mako
+/tests/** @oswfrans @oswin-mako
+/.github/** @oswfrans @oswin-mako
+/.github/workflows/** @oswfrans @oswin-mako
+/.github/codeql/** @oswfrans @oswin-mako
+/.github/dependabot.yml @oswfrans @oswin-mako
+/SECURITY.md @oswfrans @oswin-mako
+/docs/contributing/actions-source-policy.md @oswfrans @oswin-mako
+/docs/contributing/ci-map.md @oswfrans @oswin-mako
+
+# Docs & governance
+/docs/** @oswfrans @oswin-mako
+/AGENTS.md @oswfrans @oswin-mako
+/CLAUDE.md @oswfrans @oswin-mako
+/CONTRIBUTING.md @oswfrans @oswin-mako
+/docs/contributing/pr-workflow.md @oswfrans @oswin-mako
+/docs/contributing/reviewer-playbook.md @oswfrans @oswin-mako

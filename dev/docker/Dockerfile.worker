@@ -1,0 +1,48 @@
+# Thala Worker Container
+#
+# Runs an OpenCode session for a single Thala task, then POSTs a completion
+# callback with a patch payload to the Thala gateway. Used by the Modal and
+# Cloudflare backends.
+#
+# Build:
+#   docker build -f Dockerfile.worker -t thala-worker .
+#
+# Required environment at runtime (set by Thala dispatch):
+#   THALA_TASK_ID          — Notion task ID (e.g. "MKT-42")
+#   THALA_TASK_BRANCH      — git branch that holds the prompt + task context
+#   THALA_GITHUB_REPO      — "org/repo" of the product repo (e.g. "example/example-app")
+#   THALA_CALLBACK_URL     — full URL to POST completion result to
+#   THALA_RUN_TOKEN        — per-run bearer token for callback authentication
+#   THALA_MODEL            — OpenCode model string (e.g. "openrouter/kimi-k2.5")
+#   OPENROUTER_API_KEY   — (or OPENAI_API_KEY / ANTHROPIC_API_KEY) passed through
+#
+# GitHub credentials are intentionally not sent to the worker. This image can
+# clone public repositories; private-repo support requires a Thala-side source
+# bundle/proxy so GitHub authority stays in the orchestrator.
+
+FROM debian:bookworm-slim
+
+# ── System dependencies ───────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js (required by OpenCode) ───────────────────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── OpenCode CLI ──────────────────────────────────────────────────────────────
+RUN npm install -g opencode-ai@latest
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+COPY docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint.sh
+COPY LICENSE LICENSE-MIT LICENSE-APACHE NOTICE /usr/share/doc/thala/
+RUN chmod +x /usr/local/bin/worker-entrypoint.sh
+
+WORKDIR /workspace
+
+ENTRYPOINT ["/usr/local/bin/worker-entrypoint.sh"]

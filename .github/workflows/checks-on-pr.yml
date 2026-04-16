@@ -1,0 +1,17 @@
+name: Quality Gate (Legacy Manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  note:
+    name: Legacy Workflow Notice
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain migration
+        run: |
+          echo "This workflow is manual-only and kept for backwards compatibility."
+          echo "Authoritative required CI runs in .github/workflows/ci-run.yml (job: CI Required Gate)."

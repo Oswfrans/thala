@@ -1,0 +1,35 @@
+Thala
+Copyright 2025 Thala Contributors
+
+Official Repository
+===================
+
+https://github.com/oswfrans/thala
+
+License
+=======
+
+This software is licensed under the MIT License — see LICENSE.
+
+Contributors
+============
+
+This NOTICE file is maintained by repository automation.
+For the latest contributor list, see the repository contributors page:
+https://github.com/oswfrans/thala/graphs/contributors
+
+All contributors retain copyright ownership of their contributions.
+Contributions are permanently attributed in the repository commit history.
+
+Acknowledgements
+================
+
+Thala was originally inspired by ZeroClaw (https://github.com/zeroclaw-labs/zeroclaw).
+
+Third-Party Dependencies
+========================
+
+This project uses third-party libraries and components,
+each licensed under their respective terms.
+
+See Cargo.lock for a complete dependency list.
