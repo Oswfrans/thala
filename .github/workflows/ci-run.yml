@@ -38,7 +38,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: bash scripts/ci/detect_change_scope.sh
+        run: bash dev/scripts/ci/detect_change_scope.sh
 
   lint:
     name: Lint
@@ -85,7 +85,7 @@ jobs:
         run: mkdir -p web/dist && touch web/dist/.gitkeep
 
       - name: Run strict delta lint gate
-        run: bash scripts/ci/rust_strict_delta_gate.sh
+        run: bash dev/scripts/ci/rust_strict_delta_gate.sh
         env:
           BASE_SHA: ${{ needs.change-scope.outputs.base_sha }}
 
@@ -210,7 +210,7 @@ jobs:
         run: cargo deny check licenses sources
 
       - name: Scan git history for secrets
-        run: bash scripts/ci/secret_history_scan.sh
+        run: bash dev/scripts/ci/secret_history_scan.sh
 
   check-32bit:
     name: Check (32-bit)
@@ -250,7 +250,7 @@ jobs:
           python-version: "3.12"
 
       - name: Run docs quality gate
-        run: bash scripts/ci/docs_quality_gate.sh
+        run: bash dev/scripts/ci/docs_quality_gate.sh
         env:
           BASE_SHA: ${{ needs.change-scope.outputs.base_sha }}
           DOCS_FILES: ${{ needs.change-scope.outputs.docs_files }}
@@ -274,7 +274,7 @@ jobs:
         run: cargo install lychee --locked --version 0.19.1 --force
 
       - name: Run docs links gate
-        run: bash scripts/ci/docs_links_gate.sh
+        run: bash dev/scripts/ci/docs_links_gate.sh
         env:
           BASE_SHA: ${{ needs.change-scope.outputs.base_sha }}
           DOCS_FILES: ${{ needs.change-scope.outputs.docs_files }}

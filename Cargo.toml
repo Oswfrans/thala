@@ -13,7 +13,7 @@ repository = "https://github.com/oswfrans/thala"
 readme = "README.md"
 keywords = ["ai", "agent", "orchestrator"]
 categories = ["command-line-utilities"]
-rust-version = "1.82"
+rust-version = "1.92"
 include = [
   "/src/**/*",
   "/Cargo.toml",
