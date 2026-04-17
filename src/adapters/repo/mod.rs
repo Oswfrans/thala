@@ -134,11 +134,22 @@ impl RepoProvider for GitRepoProvider {
         branch: &str,
         _github_token: &str,
     ) -> Result<(), ThalaError> {
+        // Create the branch from HEAD if it doesn't already exist.
+        let branch_exists = self
+            .run_git(&["rev-parse", "--verify", branch], workspace_root)
+            .await
+            .is_ok();
+        if !branch_exists {
+            self.run_git(&["checkout", "-b", branch], workspace_root)
+                .await?;
+        }
         self.run_git(
             &["push", "--set-upstream", "origin", branch],
             workspace_root,
         )
         .await?;
+        // Switch back to the previous branch so the workspace stays clean.
+        self.run_git(&["checkout", "-"], workspace_root).await.ok();
         Ok(())
     }
 

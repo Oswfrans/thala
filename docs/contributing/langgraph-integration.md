@@ -44,7 +44,7 @@ LangGraph provides a stateful graph execution engine that guarantees consistent 
 ### Installation
 
 ```bash
-pip install thala-tools
+uv add thala-tools
 ```
 
 ### Basic Usage

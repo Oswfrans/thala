@@ -51,7 +51,7 @@ Run `bash dev/setup.sh` — it installs and validates all of these:
 | `gh` | Required | Required | Required | Required | PR creation + CI status. Run `gh auth login` once |
 | `gcloud` | Required | Required | Required | Required | GCP deployments. Run `gcloud auth login` once |
 | `opencode` | Required | Not needed | Not needed | Not needed | Worker agent binary — runs inside the remote container |
-| `modal` | Not needed | Not needed | Not needed | Required | Modal CLI. `pip install modal && modal setup` |
+| `modal` | Not needed | Not needed | Not needed | Required | Modal CLI. `uv tool install modal && modal token new` |
 | Your build tools | Depends on hooks | Not needed | Not needed | Not needed | Whatever your `before_run` hooks call (e.g. `bun`, `npm`, `cargo`) |
 
 > **Note on build tools:** Thala itself has no dependency on `bun`, `npm`, or any language runtime. The build tools in the table above are driven entirely by the `hooks` you define in your product's `WORKFLOW.md`. If your hooks run `bun install` you need `bun`; if they run `cargo test` you need Rust. Install whatever your hooks require.
@@ -363,39 +363,34 @@ tracker:
   beads_workspace_root: /path/to/your-app
   beads_ready_status: open
 
-workspace:
-  root: /path/to/your-app
+execution:
+  backend: modal
+  callback_base_url: "https://thala.yourdomain.com"   # public URL of Thala's gateway
+  github_token_env: THALA_GITHUB_TOKEN                 # env var holding a GitHub PAT
 
 hooks:
   after_create: "bun install"
   before_run: "git pull --rebase --autostash origin main"
   after_run: ""
-  before_remove: ""
 
-worker:
-  backend: modal
-  modal:
-    app_file: dev/infra/modal_worker.py    # path relative to this repo
-    function_name: run_worker
-    timeout_secs: 3600
-    # gpu: "T4"                        # uncomment for GPU-heavy tasks
-  callback_base_url: "https://thala.yourdomain.com"   # public URL of Thala's gateway
-  callback_secret_env: THALA_CALLBACK_SECRET           # env var holding the shared secret
-  github_repo: "example/example-app"
-  github_token_env: THALA_GITHUB_TOKEN                 # env var holding a GitHub PAT
+models:
+  worker: "opencode/kimi-k2.5"
+  manager: "anthropic/claude-opus-4-6"
+  max_review_cycles: 2
 
-agent:
-  max_concurrent_agents: 5    # Modal can scale more freely than local tmux
+limits:
+  max_concurrent_runs: 5    # Modal can scale more freely than local tmux
   stall_timeout_ms: 3600000
-  max_retries: 3
-  model_default:    "opencode/kimi-k2.5"
-  model_hard_tasks: "opencode/claude-sonnet-4-6"
 
-polling:
-  interval_ms: 60000
+retry:
+  max_attempts: 3
 ---
 (same Tera prompt template as above)
 ```
+
+> **Modal worker file:** Thala defaults to `dev/infra/modal_worker.py::run_worker` for the
+> Modal worker app. Override with the `MODAL_APP_FILE` environment variable
+> (e.g. `MODAL_APP_FILE=path/to/worker.py::my_function`).
 
 Additional env vars required in the systemd service (see [Required environment variables](#required-environment-variables-systemd)):
 

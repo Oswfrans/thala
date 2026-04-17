@@ -53,6 +53,8 @@ import modal
 
 # ── Modal image ───────────────────────────────────────────────────────────────
 # Build a reusable image layer with OpenCode pre-installed.
+# Uses the v2 image builder (faster, reproducible layer caching).
+# To enable v2 workspace-wide: modal.com/settings/image-config
 worker_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git", "curl", "jq", "openssl")
@@ -61,6 +63,23 @@ worker_image = (
         "apt-get install -y nodejs",
         "npm install -g opencode-ai@latest",
     )
+)
+
+# ── Task-specific secrets ─────────────────────────────────────────────────────
+# Thala injects per-run env vars via modal.Secret.from_dict(env_vars) when
+# calling run_worker.remote() from the ModalBackend Rust adapter.
+# For local testing, set THALA_* vars in your shell and run:
+#   THALA_TASK_ID=TEST-1 ... modal run dev/infra/modal_worker.py::run_worker
+# The _task_secret below picks them up automatically when present.
+_LOCAL_TASK_VARS = [
+    "THALA_TASK_ID", "THALA_TASK_BRANCH", "THALA_GITHUB_REPO",
+    "THALA_CALLBACK_URL", "THALA_RUN_TOKEN", "THALA_MODEL",
+    "THALA_PROMPT_B64", "THALA_AFTER_CREATE_HOOK", "THALA_BEFORE_RUN_HOOK",
+    "THALA_AFTER_RUN_HOOK", "GITHUB_TOKEN",
+    "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+]
+_task_secret = modal.Secret.from_dict(
+    {k: os.environ[k] for k in _LOCAL_TASK_VARS if k in os.environ}
 )
 
 # ── Modal app ─────────────────────────────────────────────────────────────────
@@ -105,14 +124,20 @@ def _send_callback(
 
 @app.function(
     timeout=int(os.environ.get("THALA_WORKER_TIMEOUT_SECS", "3600")),
+    secrets=[_task_secret],
     # GPU can be overridden per-invocation via Modal's --gpu flag or by
     # setting the MODAL_GPU env var before calling `modal run`.
     # gpu=modal.gpu.T4(),  # uncomment for GPU-heavy tasks
 )
 def run_worker() -> int:
     """
-    Main worker entrypoint. Reads all config from environment variables so
-    Thala can pass task-specific values via `modal run --env KEY=VALUE`.
+    Main worker entrypoint. Reads all config from environment variables.
+
+    Thala's ModalBackend passes task-specific values via
+    modal.Secret.from_dict(env_vars) when calling run_worker.remote().
+    For local testing, export THALA_* vars in your shell before running:
+        export THALA_TASK_ID=TEST-1 THALA_GITHUB_REPO=org/repo ...
+        modal run dev/infra/modal_worker.py::run_worker
     """
     task_id = os.environ["THALA_TASK_ID"]
     task_branch = os.environ["THALA_TASK_BRANCH"]

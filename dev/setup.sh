@@ -146,13 +146,18 @@ if [[ "$BACKEND" == "local" ]]; then
 elif [[ "$BACKEND" == "modal" ]]; then
     step "2. Modal backend tools (modal CLI)..."
 
-    if ! command -v python3 &>/dev/null; then
-        warn "python3 not found — required for Modal CLI"
-        info "Install python3, then: pip install modal && modal setup"
+    if ! command -v uv &>/dev/null && ! command -v python3 &>/dev/null; then
+        warn "Neither uv nor python3 found — required for Modal CLI"
+        info "Install uv (recommended): curl -LsSf https://astral.sh/uv/install.sh | sh"
+        info "Then: uv tool install modal && modal token new"
     elif ! command -v modal &>/dev/null; then
         warn "modal CLI not found"
-        info "Install: pip install modal"
-        info "Then authenticate: modal setup"
+        if command -v uv &>/dev/null; then
+            info "Install: uv tool install modal"
+        else
+            info "Install: pip install modal"
+        fi
+        info "Then authenticate: modal token new"
     else
         ok "modal found at $(command -v modal)"
         MODAL_VERSION=$(modal --version 2>/dev/null || echo "unknown")
@@ -360,7 +365,7 @@ case "$BACKEND" in
         check_optional bun      "workspace hooks using bun will fail"
         ;;
     modal)
-        check_optional modal "Modal dispatch will fail — run: pip install modal && modal setup"
+        check_optional modal "Modal dispatch will fail — run: uv tool install modal && modal token new"
         ;;
     cloudflare)
         check_optional docker "dev/docker/Dockerfile.worker image cannot be built without docker"

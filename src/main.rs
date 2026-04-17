@@ -319,7 +319,7 @@ fn run_onboard() -> Result<()> {
             );
             (
                 format!(
-                    "\nexecution:\n  backend: opencode-zen\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
+                    "\nexecution:\n  backend: opencode-zen\n  workspace_root: \"{workspace_root}\"\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
                 ),
                 "\nRequired env vars:\n  OPENCODE_API_KEY=sk-...\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)",
             )
@@ -331,7 +331,7 @@ fn run_onboard() -> Result<()> {
             );
             (
                 format!(
-                    "\nexecution:\n  backend: cloudflare\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
+                    "\nexecution:\n  backend: cloudflare\n  workspace_root: \"{workspace_root}\"\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
                 ),
                 "\nRequired env vars:\n  CF_ACCOUNT_ID=...\n  CF_API_TOKEN=...\n  CF_WORKER_IMAGE=registry.example.com/thala-worker:latest\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)",
             )
@@ -347,7 +347,7 @@ fn run_onboard() -> Result<()> {
             );
             (
                 format!(
-                    "\nexecution:\n  backend: modal\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN\n\n# MODAL_APP_FILE={app_file}  # set this as an env var before starting Thala"
+                    "\nexecution:\n  backend: modal\n  workspace_root: \"{workspace_root}\"\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN\n\n# MODAL_APP_FILE={app_file}  # set this as an env var before starting Thala"
                 ),
                 "\nRequired env vars:\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)\n  MODAL_APP_FILE=dev/infra/modal_worker.py::run_worker",
             )
@@ -431,7 +431,7 @@ You are an expert developer working on **{product}**.
 
 **ID:** {{{{ issue.identifier }}}}
 **Title:** {{{{ issue.title }}}}
-**Attempt:** {{{{ issue.attempt }}}}
+**Attempt:** {{{{ run.attempt }}}}
 
 ## Acceptance Criteria
 
@@ -459,11 +459,17 @@ When complete, write `DONE` to `.thala/signals/{{{{ issue.identifier }}}}.signal
     io::stdin().read_line(&mut confirm).ok();
     if confirm.trim().to_lowercase() == "y" {
         if let Some(parent) = std::path::Path::new(&out_path).parent() {
-            std::fs::create_dir_all(parent).ok();
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("✗ Could not create directory {}: {e}", parent.display());
+                eprintln!("  Create the workspace directory first, then copy the WORKFLOW.md preview above.");
+                eprintln!("  Or run: mkdir -p {} && cp /dev/stdin {out_path}", parent.display());
+            } else if let Err(e) = std::fs::write(&out_path, &workflow_md) {
+                eprintln!("✗ Failed to write {out_path}: {e}");
+                eprintln!("  Copy the preview above manually.");
+            } else {
+                println!("✓ Written to {out_path}");
+            }
         }
-        std::fs::write(&out_path, &workflow_md)
-            .with_context(|| format!("Failed to write {out_path}"))?;
-        println!("✓ Written to {out_path}");
     } else {
         println!("Skipped write. Copy the preview above manually.");
     }
@@ -497,7 +503,7 @@ When complete, write `DONE` to `.thala/signals/{{{{ issue.identifier }}}}.signal
 
 // ── Modal setup helper ────────────────────────────────────────────────────────
 
-/// Check for uv, install Modal if needed, then run `modal setup` interactively.
+/// Check for uv, install Modal if needed, then authenticate interactively.
 ///
 /// Called from the onboarding wizard when the user selects the Modal backend.
 /// We prefer uv because it is significantly faster than pip.
@@ -520,30 +526,104 @@ fn setup_modal() {
         println!("✓ modal CLI already installed — skipping install");
     } else if has_uv {
         println!("Installing modal via uv ...");
-        match Command::new("uv")
+        let ok = Command::new("uv")
             .args(["tool", "install", "modal"])
             .status()
-        {
-            Ok(s) if s.success() => println!("✓ modal installed via uv"),
-            Ok(s) => eprintln!("✗ uv tool install modal exited {s} — run it manually"),
-            Err(e) => eprintln!("✗ Failed to run uv: {e} — run: uv tool install modal"),
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            println!("✓ modal installed via uv");
+            println!("  Note: if the auth step below fails with 'command not found',");
+            println!("  open a new terminal (to refresh PATH) and run: modal token new");
+        } else {
+            eprintln!("✗ uv tool install modal failed — run it manually, then re-run onboarding");
+            return;
         }
     } else {
-        println!("uv not found — installing modal via pip ...");
-        match Command::new("pip").args(["install", "modal"]).status() {
-            Ok(s) if s.success() => println!("✓ modal installed via pip"),
-            Ok(s) => eprintln!("✗ pip install modal exited {s} — run it manually"),
-            Err(e) => eprintln!("✗ Failed to run pip: {e} — run: pip install modal"),
+        // Check for Python 3 before attempting pip
+        let has_python = Command::new("python3")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_python {
+            eprintln!("✗ Neither uv nor python3 found — cannot install Modal CLI automatically.");
+            eprintln!("  Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh");
+            eprintln!("  Then run: uv tool install modal");
+            eprintln!("  Then re-run: ./target/release/thala onboard");
+            return;
+        }
+        println!("uv not found — falling back to pip to install modal ...");
+        println!("(Consider installing uv for faster tooling: https://astral.sh/uv)");
+        // Try `python3 -m pip` first (reliable on Debian/Ubuntu where bare `pip`
+        // is often missing), then fall back to bare `pip`.
+        let ok = Command::new("python3")
+            .args(["-m", "pip", "install", "modal"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or_else(|_| {
+                Command::new("pip")
+                    .args(["install", "modal"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            });
+        if ok {
+            println!("✓ modal installed via pip");
+        } else {
+            eprintln!("✗ pip install modal failed — install uv and run: uv tool install modal");
+            return;
         }
     }
 
-    // modal setup must run interactively so the user can authenticate in the browser.
     println!();
-    println!("Running `modal setup` — a browser window will open for login.");
+    println!("You need a Modal account to continue.");
+    println!("If you don't have one, sign up for free at https://modal.com before proceeding.");
     println!();
-    match Command::new("modal").arg("setup").status() {
-        Ok(s) if s.success() => println!("✓ modal setup complete"),
-        Ok(s) => eprintln!("✗ modal setup exited {s} — re-run `modal setup` manually"),
-        Err(e) => eprintln!("✗ Failed to run modal: {e} — run `modal setup` after installing"),
+    // `modal token new` is the current auth command (Modal CLI >= 0.60).
+    // Fall back to `modal setup` for older installs.
+    println!("Running `modal token new` — a browser window will open for authentication.");
+    println!();
+    let auth_status = Command::new("modal").args(["token", "new"]).status();
+    let auth_ok = match auth_status {
+        Ok(s) if s.success() => {
+            println!("✓ Modal authentication complete");
+            true
+        }
+        Ok(_) => {
+            // Older CLI versions use `modal setup`
+            println!("  `modal token new` unavailable — trying `modal setup` (older CLI) ...");
+            match Command::new("modal").arg("setup").status() {
+                Ok(s) if s.success() => {
+                    println!("✓ modal setup complete");
+                    true
+                }
+                Ok(s) => {
+                    eprintln!("✗ modal setup exited {s} — re-run `modal token new` manually");
+                    false
+                }
+                Err(e) => {
+                    eprintln!("✗ Failed to run modal: {e}");
+                    eprintln!("  The modal binary may not be on PATH yet.");
+                    eprintln!("  Open a new terminal and run: modal token new");
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ Failed to run modal: {e}");
+            eprintln!("  The modal binary may not be on PATH yet (common after a fresh install).");
+            eprintln!("  Open a new terminal and run: modal token new");
+            false
+        }
+    };
+
+    if auth_ok {
+        println!();
+        println!("Verifying Modal connectivity ...");
+        match Command::new("modal").args(["app", "list"]).status() {
+            Ok(s) if s.success() => println!("✓ Modal connected — remote compute is available"),
+            _ => println!("  Run `modal app list` to verify the connection manually"),
+        }
     }
 }

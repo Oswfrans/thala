@@ -20,9 +20,12 @@
 //!   - `MODAL_ENVIRONMENT` — Modal environment/workspace to target
 
 use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::core::error::ThalaError;
 use crate::core::run::{ExecutionBackendKind, RunObservation, WorkerHandle};
@@ -143,24 +146,40 @@ impl ExecutionBackend for ModalBackend {
             cmd.env("MODAL_ENVIRONMENT", env);
         }
 
-        let output = cmd
-            .output()
-            .await
-            .map_err(|e| ThalaError::backend("modal", format!("modal run failed: {e}")))?;
+        // Spawn the process with piped stdout so we can read lines as they arrive.
+        // We must NOT call .output() — that blocks until the process exits, and
+        // `modal run --detach` in Modal 1.x streams logs until the remote function
+        // finishes (which for a coding task can be hours).
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| ThalaError::backend("modal", format!("failed to spawn modal: {e}")))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ThalaError::backend(
-                "modal",
-                format!("modal run exited non-zero: {}", stderr.trim()),
-            ));
-        }
+        // Read stdout line by line until we see the app/function-call ID or time out.
+        // Once we have the ID we kill the local CLI — the remote job keeps running
+        // because of --detach.
+        let stdout_handle = child.stdout.take().expect("piped stdout");
+        let mut lines = BufReader::new(stdout_handle).lines();
 
-        // Parse the app/function-call ID from stdout.
-        // Modal CLI prints a line containing "ap-<id>" (app) or "fc-<id>" (function call).
-        // Falls back to run_id if neither prefix is found (e.g. older CLI versions).
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let job_id = parse_modal_job_id(&stdout).unwrap_or_else(|| req.run_id.clone());
+        let job_id = tokio::time::timeout(Duration::from_secs(90), async {
+            let mut found: Option<String> = None;
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::debug!(task_id = %req.task_id, "modal: {line}");
+                if let Some(id) = parse_modal_job_id(&line) {
+                    found = Some(id);
+                    break;
+                }
+            }
+            found
+        })
+        .await
+        .map_err(|_| ThalaError::backend("modal", "timed out waiting for Modal app ID"))?
+        .unwrap_or_else(|| req.run_id.clone());
+
+        // Kill the local CLI process — the remote Modal job keeps running.
+        child.kill().await.ok();
+        child.wait().await.ok();
 
         tracing::info!(
             task_id = %req.task_id,
