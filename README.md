@@ -4,9 +4,11 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org)
 
-Thala is an opinionated open-source agent development framework for turning tracked development tasks into reviewed code changes. It reads tasks from Beads by default or Notion optionally, assembles context-rich prompts, spawns OpenCode workers in isolated tmux/git worktrees or remote containers, monitors those sessions, and handles validation, retries, and human escalation - all driven by a per-product `WORKFLOW.md` config file.
+This is an alpha version that I made because I found it interesting. Use at your own peril and discretion for now. Short pitch: Claude managed agents, but opensource.
 
-Model routing is config-driven via `WORKFLOW.md` — never hardcoded.
+Thala is an opinionated open-source agent development framework for turning tracked development tasks into reviewed code changes. It reads tasks from Beads by default or Notion optionally, assembles context-rich prompts, spawns OpenCode workers in isolated tmux/git worktrees or remote containers(such as Modal or Cloudflare), monitors those sessions, and handles validation, retries, and human escalation - all driven by a per-product `WORKFLOW.md` config file.
+
+Model routing is config-driven via `WORKFLOW.md.
 
 ## Quick Start
 
@@ -74,7 +76,12 @@ cargo test
 
 ## Acknowledgements
 
-Thala was originally inspired by [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw).
+Thala interaction was partly inspired by [ZeroClaw](https://github.com/zeroclaw-labs/zeroclaw).
+Thala was inspired by all the various frameworks I have read about on X. Gastown, Claude managed agents, Glass etc.
+
+## Contributing
+
+PRs are more than welcome. Got feedback DM me on X [@oswinfrans] (https://x.com/oswinfrans)
 
 ## License
 
