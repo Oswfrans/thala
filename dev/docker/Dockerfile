@@ -9,7 +9,7 @@ COPY web/ .
 RUN npm run build
 
 # ── Stage 1: Build ────────────────────────────────────────────
-FROM rust:1.94-slim@sha256:cf09adf8c3ebaba10779e5c23ff7fe4df4cccdab8a91f199b0c142c53fef3e1a AS builder
+FROM rust:1.95-slim@sha256:275c320a57d0d8b6ab09454ab6d1660d70c745fb3cc85adbefad881b69a212cc AS builder
 
 WORKDIR /app
 ARG THALA_CARGO_FEATURES="memory-postgres"
