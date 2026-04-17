@@ -37,8 +37,7 @@ async fn local_backend_reports_correct_kind() {
 #[test]
 fn modal_backend_reports_correct_kind() {
     let config = ModalConfig {
-        app_name: "test-app".into(),
-        image: "test-image".into(),
+        app_file: "dev/infra/modal_worker.py::run_worker".into(),
         environment: None,
     };
     let backend = ModalBackend::new(config);
@@ -53,8 +52,7 @@ async fn modal_backend_observe_falls_back_gracefully() {
     // the job_id as cursor (non-changing) and is_alive = true so that a missing
     // CLI does not incorrectly mark a worker as dead.
     let config = ModalConfig {
-        app_name: "test-app".into(),
-        image: "test-image".into(),
+        app_file: "dev/infra/modal_worker.py::run_worker".into(),
         environment: None,
     };
     let backend = ModalBackend::new(config);
@@ -75,8 +73,7 @@ async fn modal_backend_observe_falls_back_gracefully() {
 async fn modal_backend_cancel_is_noop() {
     // The cancel() method is stubbed and just logs
     let config = ModalConfig {
-        app_name: "test-app".into(),
-        image: "test-image".into(),
+        app_file: "dev/infra/modal_worker.py::run_worker".into(),
         environment: None,
     };
     let backend = ModalBackend::new(config);

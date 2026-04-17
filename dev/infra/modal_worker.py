@@ -128,7 +128,12 @@ def run_worker() -> int:
     print(f"[thala-worker] Starting task {task_id} on branch {task_branch}")
 
     # ── Clone repo ────────────────────────────────────────────────────────────
-    repo_url = f"https://github.com/{github_repo}.git"
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if github_token:
+        # Embed the token in the URL so git doesn't prompt for credentials.
+        repo_url = f"https://x-access-token:{github_token}@github.com/{github_repo}.git"
+    else:
+        repo_url = f"https://github.com/{github_repo}.git"
     work_dir = Path("/workspace/repo")
 
     subprocess.run(
@@ -146,14 +151,20 @@ def run_worker() -> int:
     os.chdir(work_dir)
 
     # ── Read prompt ───────────────────────────────────────────────────────────
-    prompt_path = work_dir / ".thala" / "prompts" / f"{task_id}.md"
-    if not prompt_path.exists():
-        msg = f"Prompt file not found: {prompt_path}"
-        print(f"ERROR: {msg}", file=sys.stderr)
-        _send_callback(callback_url, run_token, task_id, "error", 1, msg)
-        return 1
-
-    prompt = prompt_path.read_text()
+    # Prefer the base64-encoded prompt injected by Thala via env var (always
+    # present when launched by ModalBackend). Fall back to the prompt file on
+    # the branch for manual / legacy invocations.
+    prompt_b64 = os.environ.get("THALA_PROMPT_B64", "")
+    if prompt_b64:
+        prompt = base64.b64decode(prompt_b64).decode()
+    else:
+        prompt_path = work_dir / ".thala" / "prompts" / f"{task_id}.md"
+        if not prompt_path.exists():
+            msg = f"Prompt not found: neither THALA_PROMPT_B64 nor {prompt_path}"
+            print(f"ERROR: {msg}", file=sys.stderr)
+            _send_callback(callback_url, run_token, task_id, "error", 1, msg)
+            return 1
+        prompt = prompt_path.read_text()
 
     # ── after_create hook ─────────────────────────────────────────────────────
     if after_create_hook:

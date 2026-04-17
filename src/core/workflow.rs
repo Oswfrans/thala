@@ -17,24 +17,31 @@ use crate::core::run::ExecutionBackendKind;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowConfig {
     /// Which execution backend to use for new runs.
+    #[serde(default)]
     pub execution: ExecutionConfig,
 
     /// Concurrency and timing limits.
+    #[serde(default)]
     pub limits: LimitsConfig,
 
     /// Model selection for workers and the manager.
+    #[serde(default)]
     pub models: ModelConfig,
 
     /// Retry and reroute policy.
+    #[serde(default)]
     pub retry: RetryPolicy,
 
     /// Merge policy for completed PRs.
+    #[serde(default)]
     pub merge: MergePolicy,
 
     /// Policy for stuck task handling.
+    #[serde(default)]
     pub stuck: StuckPolicy,
 
     /// Lifecycle hooks (shell commands run at key points).
+    #[serde(default)]
     pub hooks: HooksConfig,
 
     /// Human product name used in notifications (e.g. "example-app").
@@ -69,13 +76,15 @@ impl WorkflowConfig {
 /// Looks for content between the first `---` line and the next `---` or `...` line.
 /// If no front-matter delimiters are found, returns the entire string.
 fn extract_front_matter(content: &str) -> &str {
-    let mut lines = content.splitn(3, '\n');
-    if lines.next().map(str::trim) != Some("---") {
+    // Split once on the first newline: part[0] is the opening "---", part[1] is
+    // everything else. Using splitn(3) would give only the *second* line as rest,
+    // not the whole block.
+    let mut parts = content.splitn(2, '\n');
+    if parts.next().map(str::trim) != Some("---") {
         return content;
     }
-    if let Some(rest) = lines.next() {
-        // rest is everything from the second line onward (up to the third split).
-        // Find the closing --- or ...
+    if let Some(rest) = parts.next() {
+        // Find the closing --- or ... delimiter.
         if let Some(close) = rest.find("\n---").or_else(|| rest.find("\n...")) {
             return &rest[..close];
         }
@@ -271,7 +280,11 @@ pub struct StuckPolicy {
 /// All commands are run in the workspace root.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HooksConfig {
-    /// Run after the worktree is created but before the worker starts.
+    /// Run after the worktree/clone is ready, before the worker starts (e.g. npm install).
+    #[serde(default)]
+    pub after_create: Option<String>,
+
+    /// Run in the worktree immediately before OpenCode starts.
     #[serde(default)]
     pub before_run: Option<String>,
 

@@ -20,8 +20,7 @@ async fn modal_backend_live_launch_and_observe() {
     // - modal CLI installed and authenticated
     // - A Modal app named "thala_worker" deployed
     let config = ModalConfig {
-        app_name: "thala_worker".into(),
-        image: "thala-worker:latest".into(),
+        app_file: "dev/infra/modal_worker.py::run_worker".into(),
         environment: None,
     };
     let backend = ModalBackend::new(config);
@@ -38,6 +37,9 @@ async fn modal_backend_live_launch_and_observe() {
         callback_token: Some("secret-token".into()),
         github_repo: Some("owner/repo".into()),
         github_token: Some("fake-token".into()),
+        after_create_hook: None,
+        before_run_hook: None,
+        after_run_hook: None,
     };
 
     // This will actually call `modal run`
@@ -85,6 +87,9 @@ async fn cloudflare_backend_live_launch_observe_cancel() {
         callback_token: Some("secret-token".into()),
         github_repo: Some("owner/repo".into()),
         github_token: Some(std::env::var("GITHUB_TOKEN").unwrap_or_default()),
+        after_create_hook: None,
+        before_run_hook: None,
+        after_run_hook: None,
     };
 
     // Launch container

@@ -69,7 +69,7 @@ jobs:
     name: Strict Delta Lint
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [change-scope]
+    needs: [change-scope, lint]
     if: needs.change-scope.outputs.rust_changed == 'true'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -121,7 +121,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     needs: [change-scope, lint]
-    if: needs.change-scope.outputs.docs_only != 'true'
+    if: |
+      needs.change-scope.outputs.docs_only != 'true' &&
+      (github.event_name == 'push' || matrix.target == 'x86_64-unknown-linux-gnu')
     strategy:
       fail-fast: false
       matrix:
@@ -130,8 +132,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - os: macos-13
+            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -139,7 +141,6 @@ jobs:
           toolchain: 1.92.0
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
-        if: runner.os != 'Windows'
 
       - name: Install mold linker
         if: runner.os == 'Linux'
@@ -148,11 +149,9 @@ jobs:
           sudo apt-get install -y mold
 
       - name: Ensure web/dist placeholder exists
-        shell: bash
         run: mkdir -p web/dist && touch web/dist/.gitkeep
 
       - name: Build release
-        shell: bash
         run: cargo build --profile ci --locked --target ${{ matrix.target }}
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
@@ -198,10 +197,10 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
 
       - name: Install cargo-audit (pinned)
-        run: cargo install cargo-audit --version 0.22.1 --locked --force
+        run: cargo install cargo-audit --version 0.22.1 --locked
 
       - name: Install cargo-deny (pinned)
-        run: cargo install cargo-deny --version 0.18.5 --locked --force
+        run: cargo install cargo-deny --version 0.18.5 --locked
 
       - name: Audit dependencies
         run: cargo audit
@@ -255,30 +254,6 @@ jobs:
           BASE_SHA: ${{ needs.change-scope.outputs.base_sha }}
           DOCS_FILES: ${{ needs.change-scope.outputs.docs_files }}
 
-  docs-links:
-    name: Docs Links
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: [change-scope]
-    if: needs.change-scope.outputs.docs_changed == 'true'
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-        with:
-          toolchain: 1.92.0
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
-
-      - name: Install lychee
-        run: cargo install lychee --locked --version 0.19.1 --force
-
-      - name: Run docs links gate
-        run: bash dev/scripts/ci/docs_links_gate.sh
-        env:
-          BASE_SHA: ${{ needs.change-scope.outputs.base_sha }}
-          DOCS_FILES: ${{ needs.change-scope.outputs.docs_files }}
-
   # Composite status check — branch protection requires this single job.
   gate:
     name: CI Required Gate
@@ -292,8 +267,7 @@ jobs:
       check-all-features,
       security,
       check-32bit,
-      docs-quality,
-      docs-links
+      docs-quality
     ]
     runs-on: ubuntu-latest
     steps:

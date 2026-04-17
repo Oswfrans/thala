@@ -53,6 +53,16 @@ pub struct LaunchRequest {
 
     /// GitHub token for remote branch operations.
     pub github_token: Option<String>,
+
+    // ── Lifecycle hooks forwarded to remote workers ───────────────────────────
+    /// Shell command run after the worktree/clone is ready, before OpenCode starts.
+    pub after_create_hook: Option<String>,
+
+    /// Shell command run in the worktree before OpenCode starts.
+    pub before_run_hook: Option<String>,
+
+    /// Shell command run after OpenCode exits, before the callback is sent.
+    pub after_run_hook: Option<String>,
 }
 
 // ── LaunchedRun ───────────────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ use crate::core::ids::{RunId, TaskId};
 
 /// Which execution backend is responsible for this run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ExecutionBackendKind {
     /// Local tmux session + git worktree on the Thala host.
     Local,

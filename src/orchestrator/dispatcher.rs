@@ -191,6 +191,10 @@ impl Dispatcher {
             github_repo: (!self.workflow.github_repo.is_empty())
                 .then(|| self.workflow.github_repo.clone()),
             github_token,
+            after_create_hook: self.workflow.hooks.after_create.clone(),
+            before_run_hook: self.workflow.hooks.before_run.clone(),
+            after_run_hook: self.workflow.hooks.after_run.clone(),
+            // before_cleanup is Thala-side only — not forwarded to the remote worker
         };
 
         let launched = backend.launch(req).await?;

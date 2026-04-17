@@ -73,6 +73,11 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
+    // Onboard doesn't need WORKFLOW.md — handle it before the file load.
+    if matches!(cli.command, Some(Command::Onboard)) {
+        return run_onboard();
+    }
+
     // Load WORKFLOW.md
     let workflow_path = cli.workflow.canonicalize().with_context(|| {
         format!(
@@ -92,9 +97,7 @@ async fn main() -> Result<()> {
             println!("WORKFLOW.md is valid.");
             return Ok(());
         }
-        Command::Onboard => {
-            return run_onboard();
-        }
+        Command::Onboard => unreachable!("handled above"),
         Command::Run => {}
     }
 
@@ -108,7 +111,7 @@ async fn main() -> Result<()> {
 
     // Execution backends
     let local = Arc::new(LocalBackend::new());
-    let modal = Arc::new(ModalBackend::new(ModalConfig::default()));
+    let modal = Arc::new(ModalBackend::new(ModalConfig::from_env()));
     let cloudflare = Arc::new(CloudflareBackend::from_env());
     let opencode_zen = Arc::new(OpenCodeZenBackend::new(OpenCodeZenConfig::from_env()));
     let router = Arc::new(DefaultBackendRouter::new(
@@ -328,7 +331,7 @@ fn run_onboard() -> Result<()> {
             );
             (
                 format!(
-                    "\nexecution:\n  backend: Cloudflare\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
+                    "\nexecution:\n  backend: cloudflare\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
                 ),
                 "\nRequired env vars:\n  CF_ACCOUNT_ID=...\n  CF_API_TOKEN=...\n  CF_WORKER_IMAGE=registry.example.com/thala-worker:latest\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)",
             )
@@ -338,11 +341,15 @@ fn run_onboard() -> Result<()> {
                 "Callback base URL (public URL of this Thala instance)",
                 "https://thala.example.com",
             );
+            let app_file = prompt(
+                "Modal worker file (relative to workspace root)",
+                "dev/infra/modal_worker.py::run_worker",
+            );
             (
                 format!(
-                    "\nexecution:\n  backend: Modal\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
+                    "\nexecution:\n  backend: modal\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN\n\n# MODAL_APP_FILE={app_file}  # set this as an env var before starting Thala"
                 ),
-                "\nRequired env vars:\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)\n  (also: pip install modal && modal setup)",
+                "\nRequired env vars:\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)\n  MODAL_APP_FILE=dev/infra/modal_worker.py::run_worker",
             )
         }
         _ => (String::new(), ""), // local — no extra env vars
@@ -391,9 +398,6 @@ models:
   manager: "{manager_model}"
   max_review_cycles: 2
 
-workspace:
-  root: {workspace_root}
-
 hooks:
   before_run: "git pull --rebase --autostash origin main"
   after_run: ""
@@ -415,6 +419,9 @@ merge:
     - "infra/**"
     - "**/migrations/**"
     - ".github/workflows/**"
+
+stuck:
+  auto_resolve_after_ms: 0
 {discord_block}
 ---
 
@@ -469,13 +476,74 @@ When complete, write `DONE` to `.thala/signals/{{{{ issue.identifier }}}}.signal
         println!("Set these in your systemd unit or shell environment before starting Thala.");
     }
 
+    // Modal-specific: check for uv, install modal, run modal setup.
+    if backend == "modal" {
+        println!();
+        println!("─── Modal setup ──────────────────────────────────────────────────────────");
+        setup_modal();
+        println!("─────────────────────────────────────────────────────────────────────────");
+    }
+
     println!();
     println!("Next steps:");
     println!("  1. Review / edit {out_path}");
     println!("  2. cargo build --release");
-    println!("  3. ./target/release/thala validate --workflow {out_path}");
-    println!("  4. ./target/release/thala run --workflow {out_path}");
+    println!("  3. ./target/release/thala --workflow {out_path} validate");
+    println!("  4. ./target/release/thala --workflow {out_path} run");
     println!();
 
     Ok(())
+}
+
+// ── Modal setup helper ────────────────────────────────────────────────────────
+
+/// Check for uv, install Modal if needed, then run `modal setup` interactively.
+///
+/// Called from the onboarding wizard when the user selects the Modal backend.
+/// We prefer uv because it is significantly faster than pip.
+fn setup_modal() {
+    use std::process::Command;
+
+    let has_uv = Command::new("uv")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let modal_installed = Command::new("modal")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if modal_installed {
+        println!("✓ modal CLI already installed — skipping install");
+    } else if has_uv {
+        println!("Installing modal via uv ...");
+        match Command::new("uv")
+            .args(["tool", "install", "modal"])
+            .status()
+        {
+            Ok(s) if s.success() => println!("✓ modal installed via uv"),
+            Ok(s) => eprintln!("✗ uv tool install modal exited {s} — run it manually"),
+            Err(e) => eprintln!("✗ Failed to run uv: {e} — run: uv tool install modal"),
+        }
+    } else {
+        println!("uv not found — installing modal via pip ...");
+        match Command::new("pip").args(["install", "modal"]).status() {
+            Ok(s) if s.success() => println!("✓ modal installed via pip"),
+            Ok(s) => eprintln!("✗ pip install modal exited {s} — run it manually"),
+            Err(e) => eprintln!("✗ Failed to run pip: {e} — run: pip install modal"),
+        }
+    }
+
+    // modal setup must run interactively so the user can authenticate in the browser.
+    println!();
+    println!("Running `modal setup` — a browser window will open for login.");
+    println!();
+    match Command::new("modal").arg("setup").status() {
+        Ok(s) if s.success() => println!("✓ modal setup complete"),
+        Ok(s) => eprintln!("✗ modal setup exited {s} — re-run `modal setup` manually"),
+        Err(e) => eprintln!("✗ Failed to run modal: {e} — run `modal setup` after installing"),
+    }
 }

@@ -154,7 +154,7 @@ mod tests {
 
     fn make_workflow(product: &str) -> WorkflowConfig {
         serde_yaml::from_str(&format!(
-            "product: \"{product}\"\ngithub_repo: \"org/repo\"\nexecution:\n  backend: Local\nlimits:\n  max_concurrent_runs: 3\nmodels:\n  worker: \"kimi-k2.5\"\n  manager: \"claude-opus-4-6\"\nretry:\n  max_attempts: 3\nmerge:\n  auto_merge: false\nstuck:\nhooks:\n"
+            "product: \"{product}\"\ngithub_repo: \"org/repo\"\nexecution:\n  backend: local\nlimits:\n  max_concurrent_runs: 3\nmodels:\n  worker: \"kimi-k2.5\"\n  manager: \"claude-opus-4-6\"\nretry:\n  max_attempts: 3\nmerge:\n  auto_merge: false\nstuck:\nhooks:\n"
         ))
         .unwrap()
     }

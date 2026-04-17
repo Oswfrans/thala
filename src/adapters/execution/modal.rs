@@ -1,7 +1,7 @@
 //! ModalBackend — serverless containers on Modal via the `modal` CLI.
 //!
 //! How it works:
-//!   1. `launch()` calls `modal run thala_worker.py` with env vars encoding
+//!   1. `launch()` calls `modal run --detach <app_file>` with env vars encoding
 //!      the task prompt, callback URL, and GitHub branch.
 //!   2. `observe()` calls `modal app logs` and tracks a cursor for stall detection.
 //!   3. `cancel()` calls `modal app stop`.
@@ -11,6 +11,13 @@
 //!   - job_handle.job_id: Modal app/call ID (e.g. "ap-abc123" or "fc-xyz789")
 //!   - remote_branch: the branch pushed to origin before spawning
 //!   - callback_token_hash: SHA-256 of the per-run bearer token
+//!
+//! Required environment variables:
+//!   - `MODAL_APP_FILE`    — path to the Modal worker Python file
+//!                           (default: dev/infra/modal_worker.py::run_worker)
+//!
+//! Optional environment variables:
+//!   - `MODAL_ENVIRONMENT` — Modal environment/workspace to target
 
 use std::path::Path;
 
@@ -23,16 +30,38 @@ use crate::ports::execution::{ExecutionBackend, LaunchRequest, LaunchedRun};
 
 // ── ModalConfig ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Default)]
-pub struct ModalConfig {
-    /// The Modal app name or entrypoint (e.g. "thala_worker").
-    pub app_name: String,
+const DEFAULT_APP_FILE: &str = "dev/infra/modal_worker.py::run_worker";
 
-    /// Docker image reference pushed to Modal's registry.
-    pub image: String,
+#[derive(Debug, Clone)]
+pub struct ModalConfig {
+    /// Path to the Modal worker Python file and function, e.g.
+    /// `"dev/infra/modal_worker.py::run_worker"`.
+    /// Overridden by `MODAL_APP_FILE` env var.
+    pub app_file: String,
 
     /// Modal environment/workspace to run in.
+    /// Overridden by `MODAL_ENVIRONMENT` env var.
     pub environment: Option<String>,
+}
+
+impl Default for ModalConfig {
+    fn default() -> Self {
+        Self {
+            app_file: DEFAULT_APP_FILE.into(),
+            environment: None,
+        }
+    }
+}
+
+impl ModalConfig {
+    pub fn from_env() -> Self {
+        Self {
+            app_file: std::env::var("MODAL_APP_FILE").unwrap_or_else(|_| DEFAULT_APP_FILE.into()),
+            environment: std::env::var("MODAL_ENVIRONMENT")
+                .ok()
+                .filter(|v| !v.is_empty()),
+        }
+    }
 }
 
 // ── ModalBackend ──────────────────────────────────────────────────────────────
@@ -79,24 +108,35 @@ impl ExecutionBackend for ModalBackend {
             ThalaError::backend("modal", "github_token is required for Modal backend")
         })?;
 
-        // Build the `modal run` command.
-        // `app_name` is the Python module entrypoint (e.g. "thala_worker.py").
+        // Build the `modal run --detach` command.
+        // --detach returns immediately with the app/call ID instead of streaming logs.
         // Env vars carry all task context; the worker reads them at startup.
         let mut cmd = tokio::process::Command::new("modal");
-        cmd.args(["run", &self.config.app_name]);
+        cmd.args(["run", "--detach", &self.config.app_file]);
 
-        // Pass config as environment variables.
+        // Pass config as environment variables — names must match modal_worker.py exactly.
         cmd.env("THALA_RUN_ID", &req.run_id)
             .env("THALA_TASK_ID", &req.task_id)
             .env("THALA_PROMPT_B64", base64_encode(&req.prompt))
             .env("THALA_MODEL", &req.model)
-            .env("THALA_BRANCH", remote_branch)
+            .env("THALA_TASK_BRANCH", remote_branch)
             .env("THALA_CALLBACK_URL", callback_url)
-            .env("GITHUB_REPO", github_repo)
+            .env("THALA_GITHUB_REPO", github_repo)
             .env("GITHUB_TOKEN", github_token);
 
         if let Some(token) = &req.callback_token {
-            cmd.env("THALA_CALLBACK_TOKEN", token);
+            cmd.env("THALA_RUN_TOKEN", token);
+        }
+
+        // Forward lifecycle hooks so the worker can replicate Thala's local behaviour.
+        if let Some(h) = &req.after_create_hook {
+            cmd.env("THALA_AFTER_CREATE_HOOK", h);
+        }
+        if let Some(h) = &req.before_run_hook {
+            cmd.env("THALA_BEFORE_RUN_HOOK", h);
+        }
+        if let Some(h) = &req.after_run_hook {
+            cmd.env("THALA_AFTER_RUN_HOOK", h);
         }
 
         if let Some(env) = &self.config.environment {
