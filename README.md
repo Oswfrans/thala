@@ -81,7 +81,7 @@ Thala was inspired by all the various frameworks I have read about on X. Gastown
 
 ## Contributing
 
-PRs are more than welcome. Got feedback DM me on X [@oswinfrans] (https://x.com/oswinfrans)
+PRs are more than welcome. Got feedback DM me on X [@oswinfrans](https://x.com/oswinfrans)
 
 ## License
 
