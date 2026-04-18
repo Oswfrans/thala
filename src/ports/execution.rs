@@ -1,6 +1,6 @@
 //! ExecutionBackend port — launch, observe, and cancel worker runs.
 //!
-//! All three backends (local, Modal, Cloudflare) implement this trait.
+//! All execution backends implement this trait.
 //! Backend-specific types (tmux session details, Modal API shapes,
 //! Cloudflare container specs) must not appear in this interface.
 
@@ -21,6 +21,9 @@ pub struct LaunchRequest {
 
     /// Human-readable task identifier (for naming worktrees/sessions).
     pub task_id: String,
+
+    /// One-based attempt number for this task.
+    pub attempt: u32,
 
     /// Product/repo name (e.g. "example-app").
     pub product: String,
@@ -85,7 +88,7 @@ pub struct LaunchedRun {
 
 /// Abstraction over local and remote worker execution environments.
 ///
-/// Implementations: LocalBackend, ModalBackend, CloudflareBackend.
+/// Implementations include LocalBackend, ModalBackend, CloudflareBackend, and OpenCodeZenBackend.
 #[async_trait]
 pub trait ExecutionBackend: Send + Sync {
     /// Which kind of backend this is.
@@ -109,7 +112,15 @@ pub trait ExecutionBackend: Send + Sync {
     ///
     /// The monitor compares the returned cursor between ticks.
     /// If the cursor changes, the worker is making progress.
-    async fn observe(&self, handle: &WorkerHandle) -> Result<RunObservation, ThalaError>;
+    ///
+    /// `prev_cursor` is the cursor from the last observation. Polling backends
+    /// (e.g. Cloudflare) use it to resume incremental log fetches instead of
+    /// re-fetching from the beginning on every tick.
+    async fn observe(
+        &self,
+        handle: &WorkerHandle,
+        prev_cursor: Option<&str>,
+    ) -> Result<RunObservation, ThalaError>;
 
     /// Forcefully terminate a worker.
     async fn cancel(&self, handle: &WorkerHandle) -> Result<(), ThalaError>;

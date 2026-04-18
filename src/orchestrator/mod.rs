@@ -8,6 +8,7 @@
 //! - [`human_loop`]  — manages interaction tickets, applies human decisions
 //! - [`reconciler`]  — reconciles state after restart
 
+pub mod callback_server;
 pub mod dispatcher;
 pub mod engine;
 pub mod human_loop;

@@ -134,23 +134,41 @@ impl RepoProvider for GitRepoProvider {
         branch: &str,
         _github_token: &str,
     ) -> Result<(), ThalaError> {
-        // Create the branch from HEAD if it doesn't already exist.
+        let original_branch = self
+            .run_git(&["rev-parse", "--abbrev-ref", "HEAD"], workspace_root)
+            .await
+            .ok()
+            .map(|b| b.trim().to_string());
+
         let branch_exists = self
             .run_git(&["rev-parse", "--verify", branch], workspace_root)
             .await
             .is_ok();
+
+        let mut switched = false;
         if !branch_exists {
             self.run_git(&["checkout", "-b", branch], workspace_root)
                 .await?;
+            switched = true;
+        } else if original_branch.as_deref() != Some(branch) {
+            self.run_git(&["checkout", branch], workspace_root).await?;
+            switched = true;
         }
-        self.run_git(
-            &["push", "--set-upstream", "origin", branch],
-            workspace_root,
-        )
-        .await?;
-        // Switch back to the previous branch so the workspace stays clean.
-        self.run_git(&["checkout", "-"], workspace_root).await.ok();
-        Ok(())
+
+        let push_result = self
+            .run_git(
+                &["push", "--set-upstream", "origin", branch],
+                workspace_root,
+            )
+            .await;
+
+        if switched {
+            if let Some(original) = original_branch.as_deref() {
+                let _ = self.run_git(&["checkout", original], workspace_root).await;
+            }
+        }
+
+        push_result.map(|_| ())
     }
 
     async fn get_diff(&self, worktree_path: &Path) -> Result<String, ThalaError> {

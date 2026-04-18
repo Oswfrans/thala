@@ -6,7 +6,7 @@
 //! Required environment variables:
 //! - ANTHROPIC_API_KEY (for ReviewAiValidator)
 //! - MODAL_TOKEN_ID and MODAL_TOKEN_SECRET (for ModalBackend)
-//! - CF_API_TOKEN and CF_ACCOUNT_ID (for CloudflareBackend)
+//! - THALA_CF_BASE_URL and THALA_CF_TOKEN (for CloudflareBackend)
 
 mod backend_live;
 mod validator_live;

@@ -260,6 +260,20 @@ fn terminal_task_rejects_all_transitions() {
 }
 
 #[test]
+fn dispatching_to_stuck_on_dispatch_failure_is_legal() {
+    let mut rec = pending_record("bd-0026");
+    rec.status = TaskStatus::Dispatching;
+    let updated = apply_transition(
+        &rec,
+        Transition::DispatchFailed {
+            reason: "template error".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(updated.status, TaskStatus::Stuck);
+}
+
+#[test]
 fn full_happy_path_compiles() {
     let run_id = RunId::new_v4();
     let rec = pending_record("bd-0024");

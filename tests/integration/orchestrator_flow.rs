@@ -10,6 +10,19 @@ use thala::core::transitions::{apply_run_transition, apply_transition, RunTransi
 use thala::ports::state_store::StateStore;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Workflow contract tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn checked_in_example_workflow_parses() {
+    let raw = include_str!("../../examples/WORKFLOW.md");
+    let workflow = thala::core::workflow::WorkflowConfig::from_markdown(raw).unwrap();
+    assert_eq!(workflow.product, "thala-core");
+    assert_eq!(workflow.tracker.backend, "beads");
+    assert_eq!(workflow.execution.backend, ExecutionBackendKind::Local);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // End-to-end task lifecycle tests
 // ─────────────────────────────────────────────────────────────────────────────
 

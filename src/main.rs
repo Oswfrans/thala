@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -20,6 +20,7 @@ use thala::adapters::interaction::slack::{SlackInteraction, SlackInteractionConf
 use thala::adapters::repo::GitRepoProvider;
 use thala::adapters::state::SqliteStateStore;
 use thala::adapters::validation::NoopValidator;
+use thala::core::run::ExecutionBackendKind;
 use thala::core::workflow::WorkflowConfig;
 use thala::orchestrator::dispatcher::DispatcherConfig;
 use thala::orchestrator::engine::{EngineConfig, OrchestratorEngine};
@@ -103,11 +104,29 @@ async fn main() -> Result<()> {
 
     // ── Wire adapters ─────────────────────────────────────────────────────────
 
+    if workflow.tracker.backend != "beads" {
+        anyhow::bail!(
+            "Unsupported tracker backend '{}'. Only 'beads' is supported right now.",
+            workflow.tracker.backend
+        );
+    }
+
     let workspace_root = PathBuf::from(&workflow.execution.workspace_root);
+    let beads_root = workflow
+        .tracker
+        .beads_workspace_root
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root.clone());
+
+    preflight_workflow(&workflow, &beads_root)?;
 
     // Beads
-    let source = Arc::new(BeadsTaskSource::new(&workspace_root));
-    let sink = Arc::new(BeadsTaskSink::new(&workspace_root));
+    let source = Arc::new(
+        BeadsTaskSource::new(&beads_root)
+            .with_ready_status(workflow.tracker.beads_ready_status.clone()),
+    );
+    let sink = Arc::new(BeadsTaskSink::new(&beads_root));
 
     // Execution backends
     let local = Arc::new(LocalBackend::new());
@@ -282,21 +301,7 @@ fn run_onboard() -> Result<()> {
     );
     let github_repo = prompt("GitHub repo slug (e.g. org/repo)", "");
 
-    // Tracker
-    let tracker_idx = choose(
-        "Which task tracker?",
-        &["Beads (default, no API key needed)", "Notion"],
-    );
-    let (tracker_backend, notion_fields) = if tracker_idx == 0 {
-        ("beads".to_string(), String::new())
-    } else {
-        let db_id = prompt("Notion database ID", "");
-        let api_key_note = "  # Set NOTION_API_TOKEN env var — do not put it here";
-        (
-            "notion".to_string(),
-            format!("\n  database_id: {db_id}{api_key_note}"),
-        )
-    };
+    println!("Task tracker: Beads.");
 
     // Execution backend
     let backend_idx = choose(
@@ -304,12 +309,19 @@ fn run_onboard() -> Result<()> {
         &[
             "local   — tmux sessions on this host (no extra credentials)",
             "opencode-zen — OpenCode Zen managed workers (OPENCODE_API_KEY)",
-            "cloudflare   — Cloudflare Containers (CF_ACCOUNT_ID, CF_API_TOKEN, CF_WORKER_IMAGE)",
+            "cloudflare   — Cloudflare Sandbox control plane (THALA_CF_BASE_URL, THALA_CF_TOKEN)",
             "modal        — Modal serverless containers (modal CLI)",
         ],
     );
     let backend_names = ["local", "opencode-zen", "cloudflare", "modal"];
     let backend = backend_names[backend_idx];
+
+    if prompt_yes_no("Install missing CLIs and initialize Beads now?", true) {
+        if let Err(e) = prepare_onboarding_environment(backend, Path::new(&workspace_root)) {
+            eprintln!("✗ Setup preflight failed: {e}");
+            eprintln!("  You can re-run onboarding after fixing this, or run bash dev/setup.sh.");
+        }
+    }
 
     let (backend_block, env_note) = match backend {
         "opencode-zen" => {
@@ -321,21 +333,15 @@ fn run_onboard() -> Result<()> {
                 format!(
                     "\nexecution:\n  backend: opencode-zen\n  workspace_root: \"{workspace_root}\"\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
                 ),
-                "\nRequired env vars:\n  OPENCODE_API_KEY=sk-...\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)",
+                "\nRequired env vars:\n  OPENCODE_API_KEY=sk-...\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_BIND=127.0.0.1:8788",
             )
         }
-        "cloudflare" => {
-            let cb = prompt(
-                "Callback base URL (public URL of this Thala instance)",
-                "https://thala.example.com",
-            );
-            (
-                format!(
-                    "\nexecution:\n  backend: cloudflare\n  workspace_root: \"{workspace_root}\"\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
-                ),
-                "\nRequired env vars:\n  CF_ACCOUNT_ID=...\n  CF_API_TOKEN=...\n  CF_WORKER_IMAGE=registry.example.com/thala-worker:latest\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)",
-            )
-        }
+        "cloudflare" => (
+            format!(
+                "\nexecution:\n  backend: cloudflare\n  workspace_root: \"{workspace_root}\"\n  github_token_env: THALA_GITHUB_TOKEN"
+            ),
+            "\nRequired env vars:\n  THALA_CF_BASE_URL=https://<control-plane>.workers.dev\n  THALA_CF_TOKEN=<shared Worker bearer token>\n  THALA_GITHUB_TOKEN=ghp_...",
+        ),
         "modal" => {
             let cb = prompt(
                 "Callback base URL (public URL of this Thala instance)",
@@ -349,10 +355,13 @@ fn run_onboard() -> Result<()> {
                 format!(
                     "\nexecution:\n  backend: modal\n  workspace_root: \"{workspace_root}\"\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN\n\n# MODAL_APP_FILE={app_file}  # set this as an env var before starting Thala"
                 ),
-                "\nRequired env vars:\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_SECRET=$(openssl rand -hex 32)\n  MODAL_APP_FILE=dev/infra/modal_worker.py::run_worker",
+                "\nRequired env vars:\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_BIND=127.0.0.1:8788\n  MODAL_APP_FILE=dev/infra/modal_worker.py::run_worker",
             )
         }
-        _ => (String::new(), ""), // local — no extra env vars
+        _ => (
+            format!("\nexecution:\n  backend: local\n  workspace_root: \"{workspace_root}\""),
+            "",
+        ),
     };
 
     // Models
@@ -375,15 +384,9 @@ fn run_onboard() -> Result<()> {
     };
 
     // Generate WORKFLOW.md
-    let tracker_block = if tracker_backend == "beads" {
-        format!(
-            "tracker:\n  backend: beads\n  active_states: [\"open\"]\n  terminal_states: [\"Done\", \"Cancelled\"]\n  beads_workspace_root: {workspace_root}\n  beads_ready_status: open"
-        )
-    } else {
-        format!(
-            "tracker:\n  backend: notion\n  active_states: [\"Ready\"]\n  terminal_states: [\"Done\", \"Cancelled\"]{notion_fields}"
-        )
-    };
+    let tracker_block = format!(
+        "tracker:\n  backend: beads\n  active_states: [\"open\"]\n  terminal_states: [\"Done\", \"Cancelled\"]\n  beads_workspace_root: {workspace_root}\n  beads_ready_status: open"
+    );
 
     let workflow_md = format!(
         r#"---
@@ -462,7 +465,10 @@ When complete, write `DONE` to `.thala/signals/{{{{ issue.identifier }}}}.signal
             if let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!("✗ Could not create directory {}: {e}", parent.display());
                 eprintln!("  Create the workspace directory first, then copy the WORKFLOW.md preview above.");
-                eprintln!("  Or run: mkdir -p {} && cp /dev/stdin {out_path}", parent.display());
+                eprintln!(
+                    "  Or run: mkdir -p {} && cp /dev/stdin {out_path}",
+                    parent.display()
+                );
             } else if let Err(e) = std::fs::write(&out_path, &workflow_md) {
                 eprintln!("✗ Failed to write {out_path}: {e}");
                 eprintln!("  Copy the preview above manually.");
@@ -499,6 +505,261 @@ When complete, write `DONE` to `.thala/signals/{{{{ issue.identifier }}}}.signal
     println!();
 
     Ok(())
+}
+
+// ── Host tool and Beads setup helpers ─────────────────────────────────────────
+
+fn preflight_workflow(workflow: &WorkflowConfig, beads_root: &Path) -> Result<()> {
+    ensure_tool_installed("bd", workflow.execution.backend.clone(), false)?;
+    if workflow.execution.backend == ExecutionBackendKind::Local {
+        ensure_tool_installed("opencode", workflow.execution.backend.clone(), false)?;
+        ensure_tool_installed("tmux", workflow.execution.backend.clone(), false)?;
+    }
+    ensure_beads_workspace(beads_root, true)
+}
+
+fn prepare_onboarding_environment(backend: &str, workspace_root: &Path) -> Result<()> {
+    ensure_tool_installed("bd", ExecutionBackendKind::Local, true)?;
+    if backend == "local" {
+        ensure_tool_installed("opencode", ExecutionBackendKind::Local, true)?;
+    }
+
+    if workspace_root.exists() {
+        ensure_beads_workspace(workspace_root, true)?;
+    } else {
+        println!(
+            "! Workspace {} does not exist yet; skipping `bd init` until it exists.",
+            workspace_root.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_tool_installed(
+    tool: &str,
+    backend: ExecutionBackendKind,
+    interactive: bool,
+) -> Result<()> {
+    if find_binary(tool).is_some() {
+        return Ok(());
+    }
+
+    if auto_install_tools()
+        || (interactive && prompt_yes_no(&format!("{tool} is missing. Install it now?"), true))
+    {
+        match tool {
+            "bd" => install_bd()?,
+            "opencode" => install_opencode()?,
+            "tmux" => install_tmux()?,
+            _ => anyhow::bail!("no installer is registered for {tool}"),
+        }
+    }
+
+    if find_binary(tool).is_none() {
+        let backend_note = if backend == ExecutionBackendKind::Local {
+            "local backend"
+        } else {
+            "selected backend"
+        };
+        anyhow::bail!(
+            "{tool} is required for the {backend_note}. Run `bash dev/setup.sh --backend {}` or install {tool} manually.",
+            backend.as_str()
+        );
+    }
+
+    Ok(())
+}
+
+fn ensure_beads_workspace(workspace_root: &Path, auto_init: bool) -> Result<()> {
+    if workspace_root.join(".beads").exists() {
+        return Ok(());
+    }
+    if !workspace_root.exists() {
+        anyhow::bail!(
+            "Beads workspace root does not exist: {}",
+            workspace_root.display()
+        );
+    }
+
+    let should_init = auto_init && auto_init_beads();
+    if !should_init {
+        anyhow::bail!(
+            "No .beads workspace found at {}. Run `bd init` there before starting Thala.",
+            workspace_root.display()
+        );
+    }
+
+    println!(
+        "Initializing Beads workspace at {} ...",
+        workspace_root.display()
+    );
+    let bd = find_binary("bd").unwrap_or_else(|| PathBuf::from("bd"));
+    let quiet = std::process::Command::new(&bd)
+        .args(["init", "--quiet"])
+        .current_dir(workspace_root)
+        .status()
+        .context("failed to run `bd init --quiet`")?;
+    if quiet.success() {
+        return Ok(());
+    }
+
+    let fallback = std::process::Command::new(&bd)
+        .arg("init")
+        .current_dir(workspace_root)
+        .status()
+        .context("failed to run `bd init`")?;
+    if fallback.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("`bd init` failed in {}", workspace_root.display())
+    }
+}
+
+fn install_bd() -> Result<()> {
+    if find_binary("bd").is_some() {
+        return Ok(());
+    }
+
+    if find_binary("brew").is_some() {
+        println!("Installing bd with Homebrew ...");
+        if run_status("brew", &["install", "beads"])? {
+            return Ok(());
+        }
+        println!("! Homebrew install failed; falling back to official install script.");
+    }
+
+    println!("Installing bd with the official Beads install script ...");
+    let script = download_script(
+        "https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh",
+        "thala-install-beads.sh",
+    )?;
+    if !std::process::Command::new("bash")
+        .arg(&script)
+        .status()
+        .context("failed to run Beads install script")?
+        .success()
+    {
+        anyhow::bail!("Beads install script failed")
+    }
+    Ok(())
+}
+
+fn install_opencode() -> Result<()> {
+    if find_binary("opencode").is_some() {
+        return Ok(());
+    }
+
+    println!("Installing opencode with the official install script ...");
+    let script = download_script("https://opencode.ai/install", "thala-install-opencode.sh")?;
+    let script_ok = std::process::Command::new("bash")
+        .arg(&script)
+        .status()
+        .context("failed to run opencode install script")?
+        .success();
+    if script_ok && find_binary("opencode").is_some() {
+        return Ok(());
+    }
+
+    if find_binary("npm").is_some() {
+        println!("Official install script did not expose opencode on PATH; trying npm ...");
+        if run_status("npm", &["install", "-g", "opencode-ai"])? {
+            return Ok(());
+        }
+    }
+
+    anyhow::bail!("opencode installation failed")
+}
+
+fn install_tmux() -> Result<()> {
+    if find_binary("tmux").is_some() {
+        return Ok(());
+    }
+    if find_binary("apt-get").is_some() {
+        println!("Installing tmux with apt-get ...");
+        if run_status("sudo", &["apt-get", "install", "-y", "tmux"])? {
+            return Ok(());
+        }
+    }
+    anyhow::bail!("tmux is missing and could not be installed automatically")
+}
+
+fn download_script(url: &str, name: &str) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(name);
+    let status = std::process::Command::new("curl")
+        .args(["-fsSL", url, "-o"])
+        .arg(&path)
+        .status()
+        .context("failed to run curl")?;
+    if status.success() {
+        Ok(path)
+    } else {
+        anyhow::bail!("failed to download installer from {url}")
+    }
+}
+
+fn run_status(program: &str, args: &[&str]) -> Result<bool> {
+    Ok(std::process::Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("failed to run {program}"))?
+        .success())
+}
+
+fn find_binary(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH");
+    let mut candidates: Vec<PathBuf> = path_var
+        .as_ref()
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| dir.join(name))
+        .collect();
+
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        candidates.extend([
+            home.join(".opencode/bin").join(name),
+            home.join(".local/bin").join(name),
+            home.join("go/bin").join(name),
+            home.join(".cargo/bin").join(name),
+            home.join(".bun/bin").join(name),
+        ]);
+    }
+
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn auto_install_tools() -> bool {
+    truthy_env("THALA_AUTO_INSTALL_TOOLS", false)
+}
+
+fn auto_init_beads() -> bool {
+    truthy_env("THALA_AUTO_INIT_BEADS", true)
+}
+
+fn truthy_env(name: &str, default: bool) -> bool {
+    std::env::var(name).map_or(default, |value| {
+        matches!(
+            value.as_str(),
+            "1" | "true" | "TRUE" | "yes" | "YES" | "y" | "Y"
+        )
+    })
+}
+
+fn prompt_yes_no(question: &str, default_yes: bool) -> bool {
+    use std::io::{self, Write};
+
+    let default = if default_yes { "Y/n" } else { "y/N" };
+    print!("{question} [{default}]: ");
+    io::stdout().flush().ok();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).ok();
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        _ => default_yes,
+    }
 }
 
 // ── Modal setup helper ────────────────────────────────────────────────────────

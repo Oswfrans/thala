@@ -5,7 +5,7 @@
 //!      the task prompt, callback URL, and GitHub branch.
 //!   2. `observe()` calls `modal app logs` and tracks a cursor for stall detection.
 //!   3. `cancel()` calls `modal app stop`.
-//!   4. Completion is signaled by a callback POST to Thala's gateway (not polling).
+//!   4. Completion is signaled by a callback POST to Thala (not polling).
 //!
 //! Runtime state that must be persisted (stored in TaskRun):
 //!   - job_handle.job_id: Modal app/call ID (e.g. "ap-abc123" or "fc-xyz789")
@@ -13,8 +13,8 @@
 //!   - callback_token_hash: SHA-256 of the per-run bearer token
 //!
 //! Required environment variables:
-//!   - `MODAL_APP_FILE`    — path to the Modal worker Python file
-//!                           (default: dev/infra/modal_worker.py::run_worker)
+//!   - `MODAL_APP_FILE` — path to the Modal worker Python file
+//!     (default: dev/infra/modal_worker.py::run_worker)
 //!
 //! Optional environment variables:
 //!   - `MODAL_ENVIRONMENT` — Modal environment/workspace to target
@@ -26,6 +26,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::time::timeout;
 
 use crate::core::error::ThalaError;
 use crate::core::run::{ExecutionBackendKind, RunObservation, WorkerHandle};
@@ -198,7 +199,11 @@ impl ExecutionBackend for ModalBackend {
         })
     }
 
-    async fn observe(&self, handle: &WorkerHandle) -> Result<RunObservation, ThalaError> {
+    async fn observe(
+        &self,
+        handle: &WorkerHandle,
+        _prev_cursor: Option<&str>,
+    ) -> Result<RunObservation, ThalaError> {
         // Fetch the last 20 lines of logs from the running Modal app/function call.
         // The log cursor is the SHA-256 of the output, changing only when new output arrives.
         // This is used purely for stall detection; completion is signaled via callback.
@@ -209,8 +214,17 @@ impl ExecutionBackend for ModalBackend {
             cmd.env("MODAL_ENVIRONMENT", env);
         }
 
-        match cmd.output().await {
-            Ok(output) if output.status.success() => {
+        match timeout(Duration::from_secs(15), cmd.output()).await {
+            Err(_) => {
+                tracing::warn!(job_id = %handle.job_id, "`modal app logs` timed out");
+                Ok(RunObservation {
+                    cursor: handle.job_id.clone(),
+                    is_alive: true,
+                    terminal_status: None,
+                    observed_at: chrono::Utc::now(),
+                })
+            }
+            Ok(Ok(output)) if output.status.success() => {
                 let log_text = String::from_utf8_lossy(&output.stdout).to_string();
                 let cursor = hash_string(&log_text);
 
@@ -219,10 +233,11 @@ impl ExecutionBackend for ModalBackend {
                 Ok(RunObservation {
                     cursor,
                     is_alive: true,
+                    terminal_status: None,
                     observed_at: chrono::Utc::now(),
                 })
             }
-            Ok(output) => {
+            Ok(Ok(output)) => {
                 // Non-zero exit typically means the app has stopped.
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 tracing::debug!(
@@ -233,10 +248,11 @@ impl ExecutionBackend for ModalBackend {
                 Ok(RunObservation {
                     cursor: "stopped".into(),
                     is_alive: false,
+                    terminal_status: None,
                     observed_at: chrono::Utc::now(),
                 })
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 // If the `modal` CLI is unavailable, return alive=true so we don't
                 // accidentally crash a live worker. The stall timeout will eventually
                 // fire if there is genuinely no progress.
@@ -244,6 +260,7 @@ impl ExecutionBackend for ModalBackend {
                 Ok(RunObservation {
                     cursor: handle.job_id.clone(),
                     is_alive: true,
+                    terminal_status: None,
                     observed_at: chrono::Utc::now(),
                 })
             }
@@ -260,11 +277,14 @@ impl ExecutionBackend for ModalBackend {
             cmd.env("MODAL_ENVIRONMENT", env);
         }
 
-        match cmd.output().await {
-            Ok(output) if output.status.success() => {
+        match timeout(Duration::from_secs(15), cmd.output()).await {
+            Err(_) => {
+                tracing::warn!(job_id = %handle.job_id, "`modal app stop` timed out");
+            }
+            Ok(Ok(output)) if output.status.success() => {
                 tracing::info!(job_id = %handle.job_id, "Modal app stopped successfully");
             }
-            Ok(output) => {
+            Ok(Ok(output)) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 // Treat stop errors as warnings — the app may already be stopped.
                 tracing::warn!(
@@ -273,7 +293,7 @@ impl ExecutionBackend for ModalBackend {
                     stderr.trim()
                 );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(job_id = %handle.job_id, "Failed to run `modal app stop`: {e}");
             }
         }

@@ -2,6 +2,7 @@
 /target-*/
 firmware/*/target
 web/dist/
+node_modules/
 *.db
 *.db-journal
 .DS_Store
@@ -13,6 +14,7 @@ docker-compose.override.yml
 
 # Environment files (may contain secrets)
 .env
+.dev.vars*
 
 # Python virtual environments
 
