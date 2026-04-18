@@ -44,6 +44,36 @@ impl LocalBackend {
         let slug = task_id.replace(['/', ':'], "-");
         workspace_root.join(format!(".thala-worktrees/{slug}"))
     }
+
+    async fn run_hook(
+        hook_name: &str,
+        hook: Option<&str>,
+        worktree: &Path,
+    ) -> Result<(), ThalaError> {
+        let Some(hook) = hook.filter(|h| !h.trim().is_empty()) else {
+            return Ok(());
+        };
+
+        let output = tokio::process::Command::new("sh")
+            .args(["-lc", hook])
+            .current_dir(worktree)
+            .output()
+            .await
+            .map_err(|e| ThalaError::backend("local", format!("{hook_name} hook failed: {e}")))?;
+
+        if !output.status.success() {
+            return Err(ThalaError::backend(
+                "local",
+                format!(
+                    "{hook_name} hook exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -66,7 +96,7 @@ impl ExecutionBackend for LocalBackend {
 
         // Create git worktree.
         let branch = format!("task/{}", req.task_id);
-        tokio::process::Command::new("git")
+        let output = tokio::process::Command::new("git")
             .args([
                 "worktree",
                 "add",
@@ -80,14 +110,41 @@ impl ExecutionBackend for LocalBackend {
             .await
             .map_err(|e| ThalaError::backend("local", format!("git worktree add failed: {e}")))?;
 
+        if !output.status.success() {
+            return Err(ThalaError::backend(
+                "local",
+                format!(
+                    "git worktree add exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            ));
+        }
+
+        tokio::fs::create_dir_all(worktree.join(".thala").join("signals"))
+            .await
+            .map_err(|e| {
+                ThalaError::backend("local", format!("Failed to create signal dir: {e}"))
+            })?;
+        tokio::fs::create_dir_all(worktree.join(".thala").join("prompts"))
+            .await
+            .map_err(|e| {
+                ThalaError::backend("local", format!("Failed to create prompt dir: {e}"))
+            })?;
+
         // Write prompt file.
-        let prompt_path = worktree.join("THALA_PROMPT.md");
+        let prompt_path = worktree
+            .join(".thala")
+            .join("prompts")
+            .join(format!("{}.md", req.task_id.replace(['/', ':'], "-")));
         tokio::fs::write(&prompt_path, &req.prompt)
             .await
             .map_err(|e| ThalaError::backend("local", format!("Failed to write prompt: {e}")))?;
 
+        Self::run_hook("after_create", req.after_create_hook.as_deref(), &worktree).await?;
+        Self::run_hook("before_run", req.before_run_hook.as_deref(), &worktree).await?;
+
         // Spawn opencode in a new tmux session.
-        // `tmux new-session -d -s {name} -c {worktree} opencode {model}`
         let status = tokio::process::Command::new("tmux")
             .args([
                 "new-session",
@@ -99,6 +156,9 @@ impl ExecutionBackend for LocalBackend {
                 "opencode",
                 "--model",
                 &req.model,
+                "--no-session",
+                "-p",
+                &req.prompt,
             ])
             .status()
             .await
@@ -128,7 +188,11 @@ impl ExecutionBackend for LocalBackend {
         })
     }
 
-    async fn observe(&self, handle: &WorkerHandle) -> Result<RunObservation, ThalaError> {
+    async fn observe(
+        &self,
+        handle: &WorkerHandle,
+        _prev_cursor: Option<&str>,
+    ) -> Result<RunObservation, ThalaError> {
         // Check if the tmux session exists.
         let session_check = tokio::process::Command::new("tmux")
             .args(["has-session", "-t", &handle.job_id])
@@ -142,6 +206,7 @@ impl ExecutionBackend for LocalBackend {
             return Ok(RunObservation {
                 cursor: "dead".into(),
                 is_alive: false,
+                terminal_status: None,
                 observed_at: chrono::Utc::now(),
             });
         }
@@ -161,6 +226,7 @@ impl ExecutionBackend for LocalBackend {
         Ok(RunObservation {
             cursor,
             is_alive: true,
+            terminal_status: None,
             observed_at: chrono::Utc::now(),
         })
     }

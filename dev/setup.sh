@@ -6,6 +6,7 @@
 #   bash dev/setup.sh                              # check/install binaries (local backend)
 #   bash dev/setup.sh --backend modal              # check/install for Modal backend
 #   bash dev/setup.sh --backend cloudflare         # check/install for Cloudflare backend
+#   bash dev/setup.sh --backend opencode-zen       # check/install for OpenCode Zen backend
 #   bash dev/setup.sh --configure                  # interactive API key + config setup
 #   bash dev/setup.sh --backend modal --configure  # both
 #
@@ -27,13 +28,13 @@ while [[ $# -gt 0 ]]; do
         --backend)      BACKEND="$2"; shift 2 ;;
         --backend=*)    BACKEND="${1#--backend=}"; shift ;;
         --configure)    CONFIGURE=true; shift ;;
-        *) echo "Usage: $0 [--backend local|modal|cloudflare] [--configure]" >&2; exit 1 ;;
+        *) echo "Usage: $0 [--backend local|modal|cloudflare|opencode-zen] [--configure]" >&2; exit 1 ;;
     esac
 done
 
 case "$BACKEND" in
-    local|modal|cloudflare) ;;
-    *) echo "Unknown backend '$BACKEND'. Valid: local, modal, cloudflare" >&2; exit 1 ;;
+    local|modal|cloudflare|opencode-zen) ;;
+    *) echo "Unknown backend '$BACKEND'. Valid: local, modal, cloudflare, opencode-zen" >&2; exit 1 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,6 +72,90 @@ prompt_secret() {
     printf -v "$var_name" '%s' "$input"
 }
 
+find_bin() {
+    local bin="$1"
+    if command -v "$bin" &>/dev/null; then
+        command -v "$bin"
+        return 0
+    fi
+    for loc in "$HOME/.opencode/bin/$bin" "$HOME/.local/bin/$bin" "$HOME/go/bin/$bin" "$HOME/.cargo/bin/$bin" "$HOME/.bun/bin/$bin"; do
+        if [[ -x "$loc" ]]; then
+            echo "$loc"
+            return 0
+        fi
+    done
+    return 1
+}
+
+install_bd() {
+    if find_bin bd >/dev/null; then
+        ok "bd found at $(find_bin bd)"
+        return 0
+    fi
+
+    step "Installing bd (Beads CLI)..."
+    if command -v brew &>/dev/null; then
+        brew install beads && ok "bd installed with Homebrew" && return 0
+        warn "Homebrew install failed; falling back to official install script"
+    fi
+
+    if command -v apt-get &>/dev/null; then
+        sudo apt-get install -y curl ca-certificates libicu-dev libzstd-dev || warn "Could not install optional Beads build dependencies"
+    fi
+
+    local script="/tmp/thala-install-beads.sh"
+    curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh -o "$script"
+    bash "$script"
+
+    if find_bin bd >/dev/null; then
+        ok "bd installed at $(find_bin bd)"
+    else
+        fail "bd install completed but bd is still not on PATH"
+        info "Add ~/.local/bin, ~/go/bin, or ~/.cargo/bin to PATH if the installer placed bd there."
+        return 1
+    fi
+}
+
+install_opencode() {
+    if find_bin opencode >/dev/null; then
+        ok "opencode found at $(find_bin opencode)"
+        return 0
+    fi
+
+    step "Installing opencode..."
+    local script="/tmp/thala-install-opencode.sh"
+    curl -fsSL https://opencode.ai/install -o "$script"
+    bash "$script" || warn "Official opencode installer failed; trying npm fallback"
+
+    if ! find_bin opencode >/dev/null && command -v npm &>/dev/null; then
+        npm install -g opencode-ai
+    fi
+
+    if find_bin opencode >/dev/null; then
+        ok "opencode installed at $(find_bin opencode)"
+    else
+        fail "opencode install failed"
+        info "Install manually with: curl -fsSL https://opencode.ai/install | bash"
+        return 1
+    fi
+}
+
+ensure_beads_workspace() {
+    local root="$1"
+    if [[ ! -d "$root" ]]; then
+        warn "Workspace does not exist yet: $root"
+        info "Create or clone the product repo, then run: cd $root && bd init --quiet"
+        return 0
+    fi
+    if [[ -d "$root/.beads" ]]; then
+        ok "Beads workspace already initialized at $root/.beads"
+        return 0
+    fi
+    info "Initializing Beads workspace in $root"
+    (cd "$root" && bd init --quiet) || (cd "$root" && bd init)
+    ok "Beads workspace initialized"
+}
+
 # ── Helper: set or replace an env var in the systemd service file ─────────────
 set_service_env() {
     local key="$1" val="$2" svc_file="$3"
@@ -98,12 +183,7 @@ else
     ok "gh found at $(command -v gh)"
 fi
 
-if ! command -v bd &>/dev/null; then
-    warn "bd (Beads CLI) not found"
-    info "Beads is the default task tracker. Install bd, or configure tracker.backend = \"notion\" in WORKFLOW.md."
-else
-    ok "bd found at $(command -v bd)"
-fi
+install_bd
 
 if ! command -v gcloud &>/dev/null; then
     warn "gcloud not found"
@@ -135,13 +215,11 @@ if [[ "$BACKEND" == "local" ]]; then
         ok "bun already installed"
     fi
 
-    if ! command -v opencode &>/dev/null && [[ ! -x "$HOME/.opencode/bin/opencode" ]]; then
-        warn "opencode not found"
-        info "Install: https://opencode.ai"
-    else
-        OPENCODE_BIN=$(command -v opencode 2>/dev/null || echo "$HOME/.opencode/bin/opencode")
-        ok "opencode found at $OPENCODE_BIN"
-    fi
+    install_opencode
+
+elif [[ "$BACKEND" == "opencode-zen" ]]; then
+    step "2. OpenCode Zen backend tools..."
+    info "Workers run in OpenCode Zen — tmux and local opencode are NOT needed on this host."
 
 elif [[ "$BACKEND" == "modal" ]]; then
     step "2. Modal backend tools (modal CLI)..."
@@ -191,11 +269,11 @@ case "$BACKEND" in
     local)
         NEW_PATH="$HOME/.opencode/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
         ;;
-    modal)
-        NEW_PATH="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+    modal|opencode-zen)
+        NEW_PATH="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
         ;;
     cloudflare)
-        NEW_PATH="$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+        NEW_PATH="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
         ;;
 esac
 
@@ -238,8 +316,7 @@ if $CONFIGURE; then
     prompt_secret OPENCODE_API_KEY "OpenCode Zen API key (opencode.ai/settings)"
     prompt_value  PRODUCT_SLUG   "Product slug (e.g. example-app)" "$(_existing "product" || echo "example-app")"
     prompt_value  WORKSPACE_ROOT "Workspace root (absolute path to product repo)" "$(_existing "workspace_root" || echo "/home/$(whoami)/example-app")"
-    prompt_secret NOTION_TOKEN   "Notion API token (ntn_...)"
-    prompt_value  NOTION_DB_ID   "Notion database ID" "$(_existing "database_id" || echo "")"
+    ensure_beads_workspace "$WORKSPACE_ROOT"
     prompt_secret DISCORD_TOKEN  "Discord bot token"
 
     # Write config.toml from template, substituting values
@@ -247,8 +324,6 @@ if $CONFIGURE; then
         -e "s|REPLACE_OPENCODE_API_KEY|${OPENCODE_API_KEY}|g" \
         -e "s|REPLACE_PRODUCT_SLUG|${PRODUCT_SLUG}|g" \
         -e "s|REPLACE_WORKSPACE_ROOT|${WORKSPACE_ROOT}|g" \
-        -e "s|REPLACE_NOTION_API_TOKEN|${NOTION_TOKEN}|g" \
-        -e "s|REPLACE_NOTION_DATABASE_ID|${NOTION_DB_ID}|g" \
         -e "s|REPLACE_DISCORD_BOT_TOKEN|${DISCORD_TOKEN}|g" \
         "$REPO_ROOT/dev/config.template.toml" > "$CONFIG_FILE"
 
@@ -267,27 +342,30 @@ if $CONFIGURE; then
     prompt_value  GCP_REGION         "GCP region" "europe-west4"
 
     # Backend-specific secrets
-    if [[ "$BACKEND" == "modal" || "$BACKEND" == "cloudflare" ]]; then
+    if [[ "$BACKEND" == "modal" || "$BACKEND" == "cloudflare" || "$BACKEND" == "opencode-zen" ]]; then
         echo ""
         echo -e "${BOLD}  Remote backend secrets${NC}"
-        prompt_secret GH_TOKEN         "GitHub PAT (repo read/write)"
-        prompt_value  CALLBACK_SECRET  "THALA_CALLBACK_SECRET (leave blank to generate)" ""
-        if [[ -z "$CALLBACK_SECRET" ]]; then
-            CALLBACK_SECRET=$(openssl rand -hex 32)
-            info "Generated THALA_CALLBACK_SECRET: $CALLBACK_SECRET"
-            info "(Copy this — you'll need it in WORKFLOW.md callback_secret_env)"
-        fi
+        prompt_secret GH_TOKEN "GitHub PAT (repo read/write)"
+    fi
+
+    if [[ "$BACKEND" == "modal" ]]; then
+        prompt_value CALLBACK_BIND "Callback listen address" "127.0.0.1:8788"
         prompt_secret OR_API_KEY "OpenRouter API key (for worker containers)"
     fi
 
+    if [[ "$BACKEND" == "opencode-zen" ]]; then
+        prompt_value CALLBACK_BIND "Callback listen address" "127.0.0.1:8788"
+    fi
+
     if [[ "$BACKEND" == "cloudflare" ]]; then
-        prompt_value  CF_ACCOUNT "Cloudflare account ID" ""
-        prompt_secret CF_TOKEN   "Cloudflare API token"
+        prompt_value  CF_BASE_URL "Cloudflare control-plane Worker URL" "http://localhost:8787"
+        prompt_secret CF_TOKEN    "Cloudflare control-plane shared bearer token (THALA_CF_TOKEN)"
+        info "Set Worker-side secrets with: cd cloudflare/control-plane && npx wrangler secret put THALA_SHARED_AUTH_TOKEN"
+        info "Also set THALA_GITHUB_TOKEN and your OpenCode provider key as Worker secrets."
     fi
 
     if [[ -f "$SERVICE_FILE" ]]; then
         # Always-required vars
-        [[ -n "$NOTION_TOKEN" ]]    && set_service_env "NOTION_API_TOKEN"          "$NOTION_TOKEN"    "$SERVICE_FILE"
         [[ -n "$DISCORD_WEBHOOK" ]] && set_service_env "DISCORD_ALERTS_WEBHOOK"    "$DISCORD_WEBHOOK" "$SERVICE_FILE"
         [[ -n "$OPENCODE_API_KEY" ]]&& set_service_env "OPENCODE_API_KEY"          "$OPENCODE_API_KEY" "$SERVICE_FILE"
         [[ -n "$TELEGRAM_TOKEN" ]]  && set_service_env "TELEGRAM_BOT_TOKEN"        "$TELEGRAM_TOKEN"  "$SERVICE_FILE"
@@ -296,29 +374,37 @@ if $CONFIGURE; then
         [[ -n "$GCP_REGION" ]]      && set_service_env "GCP_REGION"                "$GCP_REGION"      "$SERVICE_FILE"
 
         # Remote backend vars
-        if [[ "$BACKEND" == "modal" || "$BACKEND" == "cloudflare" ]]; then
-            [[ -n "$GH_TOKEN" ]]         && set_service_env "THALA_GITHUB_TOKEN"     "$GH_TOKEN"         "$SERVICE_FILE"
-            [[ -n "$CALLBACK_SECRET" ]]  && set_service_env "THALA_CALLBACK_SECRET"  "$CALLBACK_SECRET"  "$SERVICE_FILE"
-            [[ -n "${OR_API_KEY:-}" ]]   && set_service_env "OPENROUTER_API_KEY"   "$OR_API_KEY"       "$SERVICE_FILE"
+        if [[ "$BACKEND" == "modal" || "$BACKEND" == "cloudflare" || "$BACKEND" == "opencode-zen" ]]; then
+            [[ -n "$GH_TOKEN" ]] && set_service_env "THALA_GITHUB_TOKEN" "$GH_TOKEN" "$SERVICE_FILE"
+        fi
+
+        if [[ "$BACKEND" == "modal" ]]; then
+            [[ -n "${CALLBACK_BIND:-}" ]] && set_service_env "THALA_CALLBACK_BIND" "$CALLBACK_BIND" "$SERVICE_FILE"
+            [[ -n "${OR_API_KEY:-}" ]]    && set_service_env "OPENROUTER_API_KEY"  "$OR_API_KEY"      "$SERVICE_FILE"
+        fi
+
+        if [[ "$BACKEND" == "opencode-zen" ]]; then
+            [[ -n "${CALLBACK_BIND:-}" ]] && set_service_env "THALA_CALLBACK_BIND" "$CALLBACK_BIND" "$SERVICE_FILE"
         fi
 
         if [[ "$BACKEND" == "cloudflare" ]]; then
-            [[ -n "${CF_ACCOUNT:-}" ]] && set_service_env "CF_ACCOUNT_ID"  "$CF_ACCOUNT" "$SERVICE_FILE"
-            [[ -n "${CF_TOKEN:-}" ]]   && set_service_env "CF_API_TOKEN"   "$CF_TOKEN"   "$SERVICE_FILE"
+            [[ -n "${CF_BASE_URL:-}" ]] && set_service_env "THALA_CF_BASE_URL" "$CF_BASE_URL" "$SERVICE_FILE"
+            [[ -n "${CF_TOKEN:-}" ]]    && set_service_env "THALA_CF_TOKEN"    "$CF_TOKEN"    "$SERVICE_FILE"
         fi
 
         systemctl --user daemon-reload
         ok "Systemd service updated with environment variables"
     else
         warn "Systemd service not found — skipping service env update"
-        warn "Run './target/release/thala service install' then re-run with --configure"
+        warn "Install your process supervisor unit first, then re-run with --configure"
         echo ""
         echo "  Env vars to add manually to the [Service] section:"
-        [[ -n "$NOTION_TOKEN" ]]       && echo "    Environment=\"NOTION_API_TOKEN=$NOTION_TOKEN\""
         [[ -n "$DISCORD_WEBHOOK" ]]    && echo "    Environment=\"DISCORD_ALERTS_WEBHOOK=$DISCORD_WEBHOOK\""
         [[ -n "$OPENCODE_API_KEY" ]]   && echo "    Environment=\"OPENCODE_API_KEY=$OPENCODE_API_KEY\""
         [[ -n "${GH_TOKEN:-}" ]]       && echo "    Environment=\"THALA_GITHUB_TOKEN=$GH_TOKEN\""
-        [[ -n "${CALLBACK_SECRET:-}" ]] && echo "    Environment=\"THALA_CALLBACK_SECRET=$CALLBACK_SECRET\""
+        [[ -n "${CALLBACK_BIND:-}" ]] && echo "    Environment=\"THALA_CALLBACK_BIND=$CALLBACK_BIND\""
+        [[ -n "${CF_BASE_URL:-}" ]] && echo "    Environment=\"THALA_CF_BASE_URL=$CF_BASE_URL\""
+        [[ -n "${CF_TOKEN:-}" ]]    && echo "    Environment=\"THALA_CF_TOKEN=$CF_TOKEN\""
     fi
 fi
 
@@ -354,21 +440,23 @@ check_optional() {
 }
 
 check_required git
-check_optional bd     "default Beads tracker will not work; configure Notion if you skip bd"
+check_required bd
 check_optional gh     "PR creation and CI checks will not work"
 check_optional gcloud "GCP deployments will not work"
 
 case "$BACKEND" in
     local)
         check_required tmux
-        check_optional opencode "worker dispatch will fail until installed"
+        check_required opencode
         check_optional bun      "workspace hooks using bun will fail"
+        ;;
+    opencode-zen)
         ;;
     modal)
         check_optional modal "Modal dispatch will fail — run: uv tool install modal && modal token new"
         ;;
     cloudflare)
-        check_optional docker "dev/docker/Dockerfile.worker image cannot be built without docker"
+        check_optional docker "local wrangler dev for Cloudflare Sandbox requires Docker"
         ;;
 esac
 

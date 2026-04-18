@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "thala-cloudflare-control-plane",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-18",
+  "compatibility_flags": ["nodejs_compat"],
+  "secrets": {
+    "required": ["THALA_SHARED_AUTH_TOKEN", "THALA_GITHUB_TOKEN"]
+  },
+  "vars": {
+    "SANDBOX_TRANSPORT": "websocket"
+  },
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 3
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TASK_ATTEMPTS",
+        "class_name": "TaskAttemptDurableObject"
+      },
+      {
+        "name": "Sandbox",
+        "class_name": "Sandbox"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["TaskAttemptDurableObject", "Sandbox"]
+    }
+  ]
+}

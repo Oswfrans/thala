@@ -16,6 +16,10 @@ use crate::core::run::ExecutionBackendKind;
 /// Top-level config loaded from WORKFLOW.md front-matter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowConfig {
+    /// Task tracker configuration. Beads is the only supported backend for now.
+    #[serde(default)]
+    pub tracker: TrackerConfig,
+
     /// Which execution backend to use for new runs.
     #[serde(default)]
     pub execution: ExecutionConfig,
@@ -91,6 +95,44 @@ fn extract_front_matter(content: &str) -> &str {
         return rest;
     }
     content
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerConfig {
+    #[serde(default = "default_tracker_backend")]
+    pub backend: String,
+
+    #[serde(default)]
+    pub active_states: Vec<String>,
+
+    #[serde(default)]
+    pub terminal_states: Vec<String>,
+
+    #[serde(default)]
+    pub beads_workspace_root: Option<String>,
+
+    #[serde(default = "default_beads_ready_status")]
+    pub beads_ready_status: String,
+}
+
+fn default_tracker_backend() -> String {
+    "beads".into()
+}
+
+fn default_beads_ready_status() -> String {
+    "open".into()
+}
+
+impl Default for TrackerConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_tracker_backend(),
+            active_states: Vec::new(),
+            terminal_states: Vec::new(),
+            beads_workspace_root: None,
+            beads_ready_status: default_beads_ready_status(),
+        }
+    }
 }
 
 // ── Interaction surface configs ───────────────────────────────────────────────

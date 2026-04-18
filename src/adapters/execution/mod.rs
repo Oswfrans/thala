@@ -8,7 +8,7 @@
 //! |---------------|----------------------------------|---------------|----------------|
 //! | Local         | tmux session name                | None          | None           |
 //! | Modal         | Modal app/call ID (ap-xxx)       | Required      | Required       |
-//! | Cloudflare    | CF container instance ID         | Required      | Required       |
+//! | Cloudflare    | control-plane remote run ID     | Required      | None           |
 //! | OpenCodeZen   | Zen session ID (oz-xxx)          | Required      | Required       |
 
 pub mod cloudflare;

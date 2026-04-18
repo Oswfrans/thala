@@ -47,6 +47,9 @@ pub enum Transition {
     /// A run has been successfully launched.
     RunLaunched { run_id: RunId },
 
+    /// Dispatch failed before a worker run was launched.
+    DispatchFailed { reason: String },
+
     /// The active run completed; move to validation.
     RunCompleted,
 
@@ -106,6 +109,7 @@ pub fn apply_transition(
 
         // ── Dispatching ───────────────────────────────────────────────────────
         (TaskStatus::Dispatching, Transition::RunLaunched { .. }) => TaskStatus::Running,
+        (TaskStatus::Dispatching, Transition::DispatchFailed { .. }) => TaskStatus::Stuck,
 
         // ── Running ───────────────────────────────────────────────────────────
         (TaskStatus::Running, Transition::RunCompleted) => TaskStatus::Validating,
@@ -146,7 +150,6 @@ pub fn apply_transition(
             return Err(StateError::IllegalTaskTransition {
                 task_id,
                 from: current.clone(),
-                to: transition_target_status(&transition),
                 reason: format!("{transition:?}"),
             });
         }
@@ -235,7 +238,6 @@ pub fn apply_run_transition(
             return Err(StateError::IllegalRunTransition {
                 run_id,
                 from: current.clone(),
-                to: run_transition_target_status(&transition),
                 reason: format!("{transition:?}"),
             });
         }
@@ -270,39 +272,6 @@ pub fn apply_run_transition(
     );
 
     Ok(updated)
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Approximate the target status from a Transition for error messages.
-/// Not used for routing — only for constructing descriptive errors.
-fn transition_target_status(t: &Transition) -> TaskStatus {
-    match t {
-        Transition::MarkReady => TaskStatus::Ready,
-        Transition::BeginDispatching
-        | Transition::ValidationFailedRetry { .. }
-        | Transition::HumanRejected { .. }
-        | Transition::RecoveryRequested => TaskStatus::Dispatching,
-        Transition::RunLaunched { .. } => TaskStatus::Running,
-        Transition::RunCompleted | Transition::HumanApproved => TaskStatus::Validating,
-        Transition::RunFailed { .. } | Transition::ValidationFailedTerminal { .. } => {
-            TaskStatus::Failed
-        }
-        Transition::RunStalled { .. } => TaskStatus::Stuck,
-        Transition::RequireHumanInput => TaskStatus::WaitingForHuman,
-        Transition::ValidationPassed => TaskStatus::Succeeded,
-        Transition::HumanResolved => TaskStatus::Resolved,
-    }
-}
-
-fn run_transition_target_status(t: &RunTransition) -> RunStatus {
-    match t {
-        RunTransition::Activated | RunTransition::ActivityObserved { .. } => RunStatus::Active,
-        RunTransition::CompletionSignaled => RunStatus::Completed,
-        RunTransition::FailureSignaled { .. } => RunStatus::Failed,
-        RunTransition::StallTimeout => RunStatus::TimedOut,
-        RunTransition::Cancelled => RunStatus::Cancelled,
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

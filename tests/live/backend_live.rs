@@ -28,6 +28,7 @@ async fn modal_backend_live_launch_and_observe() {
     let req = LaunchRequest {
         run_id: "test-run-001".into(),
         task_id: "bd-test-001".into(),
+        attempt: 1,
         product: "test-app".into(),
         prompt: "Test prompt".into(),
         model: "claude-sonnet".into(),
@@ -47,7 +48,7 @@ async fn modal_backend_live_launch_and_observe() {
     assert_eq!(launched.handle.backend, ExecutionBackendKind::Modal);
 
     // Observe should return real cursor from modal logs
-    let obs = backend.observe(&launched.handle).await.unwrap();
+    let obs = backend.observe(&launched.handle, None).await.unwrap();
     // Real implementation should have meaningful cursor
     assert!(!obs.cursor.is_empty());
 
@@ -60,24 +61,24 @@ async fn modal_backend_live_launch_and_observe() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-#[ignore = "requires Cloudflare API credentials"]
+#[ignore = "requires THALA_CF_BASE_URL and THALA_CF_TOKEN for a running Cloudflare control-plane Worker"]
 async fn cloudflare_backend_live_launch_observe_cancel() {
     // This test requires:
-    // - CF_API_TOKEN environment variable set
-    // - CF_ACCOUNT_ID environment variable set
-    // - A valid container image pushed to a registry
+    // - THALA_CF_BASE_URL pointing at a deployed control-plane Worker
+    // - THALA_CF_TOKEN matching THALA_SHARED_AUTH_TOKEN on the Worker
 
     let config = CloudflareConfig {
-        account_id: std::env::var("CF_ACCOUNT_ID").unwrap_or_default(),
-        image: "docker.io/yourorg/thala-worker:latest".into(),
-        vcpus: Some(1),
-        memory_mb: Some(512),
+        base_url: std::env::var("THALA_CF_BASE_URL").unwrap_or_default(),
+        auth_token: std::env::var("THALA_CF_TOKEN").unwrap_or_default(),
+        max_duration_seconds: 60,
+        allow_network: true,
     };
     let backend = CloudflareBackend::new(config);
 
     let req = LaunchRequest {
         run_id: "test-run-002".into(),
         task_id: "bd-test-002".into(),
+        attempt: 1,
         product: "test-app".into(),
         prompt: "Test prompt for Cloudflare".into(),
         model: "claude-sonnet".into(),
@@ -92,20 +93,19 @@ async fn cloudflare_backend_live_launch_observe_cancel() {
         after_run_hook: None,
     };
 
-    // Launch container
+    // Launch remote control-plane task
     let launched = backend.launch(req).await.unwrap();
     assert_eq!(launched.handle.backend, ExecutionBackendKind::Cloudflare);
     assert!(!launched.handle.job_id.is_empty());
 
-    // Observe container status
-    let obs = backend.observe(&launched.handle).await.unwrap();
-    // Should be running, starting, or pending
-    assert!(obs.is_alive || obs.cursor == "deleted");
+    // Observe remote task status
+    let obs = backend.observe(&launched.handle, None).await.unwrap();
+    assert!(!obs.cursor.is_empty());
 
     // Cancel container
     backend.cancel(&launched.handle).await.unwrap();
 
-    // Verify it's gone
-    let obs = backend.observe(&launched.handle).await.unwrap();
+    // Verify terminal cancellation is visible
+    let obs = backend.observe(&launched.handle, None).await.unwrap();
     assert!(!obs.is_alive);
 }

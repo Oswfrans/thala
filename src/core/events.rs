@@ -18,84 +18,32 @@ use crate::core::validation::ValidationOutcome;
 // ── OrchestratorEvent ─────────────────────────────────────────────────────────
 
 /// All events emitted within the orchestration kernel.
+///
+/// Variants annotated "observability-only" are emitted for tracing/logging
+/// purposes but are not consumed by any routing logic in the engine.
+/// Only the explicitly-routed variants trigger engine dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OrchestratorEvent {
-    // ── Scheduler events ──────────────────────────────────────────────────────
-    /// The scheduler identified a task that is ready to dispatch.
+    // ── Routed events ─────────────────────────────────────────────────────────
+
+    /// Routed → engine → dispatcher.dispatch.
     DispatchReady { task_id: TaskId, at: DateTime<Utc> },
 
-    // ── Dispatcher events ─────────────────────────────────────────────────────
-    /// A run was successfully launched on a backend.
-    RunLaunched {
-        task_id: TaskId,
-        run_id: RunId,
-        backend: ExecutionBackendKind,
-        at: DateTime<Utc>,
-    },
-
-    /// A run failed to launch (spawn error, preflight failure).
-    RunLaunchFailed {
-        task_id: TaskId,
-        reason: String,
-        at: DateTime<Utc>,
-    },
-
-    // ── Monitor events ────────────────────────────────────────────────────────
-    /// The monitor observed new activity from a running worker.
-    RunActivityObserved { run_id: RunId, at: DateTime<Utc> },
-
-    /// The worker signaled completion (exit 0 or successful callback).
+    /// Routed → engine → validator.handle_run_completed.
     RunCompleted {
         task_id: TaskId,
         run_id: RunId,
         at: DateTime<Utc>,
     },
 
-    /// The worker reported failure (non-zero exit or failure callback).
-    RunFailed {
-        task_id: TaskId,
-        run_id: RunId,
-        reason: String,
-        at: DateTime<Utc>,
-    },
-
-    /// The run exceeded the stall timeout with no output change.
+    /// Routed → engine → creates stuck ticket + notifies channels.
     RunTimedOut {
         task_id: TaskId,
         run_id: RunId,
         at: DateTime<Utc>,
     },
 
-    /// The run was cancelled by the orchestrator.
-    RunCancelled { run_id: RunId, at: DateTime<Utc> },
-
-    /// The run transitioned to a new RunStatus.
-    RunStatusChanged {
-        run_id: RunId,
-        from: RunStatus,
-        to: RunStatus,
-        at: DateTime<Utc>,
-    },
-
-    // ── Validation events ─────────────────────────────────────────────────────
-    /// A validator produced an outcome.
-    ValidationResult {
-        task_id: TaskId,
-        run_id: RunId,
-        outcome: ValidationOutcome,
-        at: DateTime<Utc>,
-    },
-
-    // ── Interaction events ────────────────────────────────────────────────────
-    /// The orchestrator issued a request for human input.
-    InteractionRequested {
-        task_id: TaskId,
-        run_id: RunId,
-        interaction_id: InteractionId,
-        at: DateTime<Utc>,
-    },
-
-    /// A human responded to an interaction request.
+    /// Routed → engine → dispatcher (retry) or validator (human-approved merge).
     InteractionResolved {
         task_id: TaskId,
         run_id: RunId,
@@ -103,16 +51,53 @@ pub enum OrchestratorEvent {
         at: DateTime<Utc>,
     },
 
-    // ── Task-level events ─────────────────────────────────────────────────────
-    /// A task transitioned to a new TaskStatus.
+    /// Routed → engine (logged); validator drives its own transitions directly.
+    ValidationResult {
+        task_id: TaskId,
+        run_id: RunId,
+        outcome: ValidationOutcome,
+        at: DateTime<Utc>,
+    },
+
+    // ── Observability-only events (emitted but not consumed by any subsystem) ─
+
+    RunLaunched {
+        task_id: TaskId,
+        run_id: RunId,
+        backend: ExecutionBackendKind,
+        at: DateTime<Utc>,
+    },
+    RunLaunchFailed {
+        task_id: TaskId,
+        reason: String,
+        at: DateTime<Utc>,
+    },
+    RunFailed {
+        task_id: TaskId,
+        run_id: RunId,
+        reason: String,
+        at: DateTime<Utc>,
+    },
+    RunActivityObserved { run_id: RunId, at: DateTime<Utc> },
+    RunCancelled { run_id: RunId, at: DateTime<Utc> },
+    RunStatusChanged {
+        run_id: RunId,
+        from: RunStatus,
+        to: RunStatus,
+        at: DateTime<Utc>,
+    },
+    InteractionRequested {
+        task_id: TaskId,
+        run_id: RunId,
+        interaction_id: InteractionId,
+        at: DateTime<Utc>,
+    },
     TaskStatusChanged {
         task_id: TaskId,
         from: TaskStatus,
         to: TaskStatus,
         at: DateTime<Utc>,
     },
-
-    /// A task was written back to Beads.
     TaskSyncedToBeads {
         task_id: TaskId,
         beads_status: String,

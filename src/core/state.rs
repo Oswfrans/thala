@@ -12,19 +12,17 @@ use thiserror::Error;
 /// is illegal given the current state.
 #[derive(Debug, Error)]
 pub enum StateError {
-    #[error("Illegal task transition for {task_id}: {from:?} → {to:?} (reason: {reason})")]
+    #[error("Illegal task transition for {task_id} from {from:?}: {reason}")]
     IllegalTaskTransition {
         task_id: TaskId,
         from: TaskStatus,
-        to: TaskStatus,
         reason: String,
     },
 
-    #[error("Illegal run transition for {run_id}: {from:?} → {to:?} (reason: {reason})")]
+    #[error("Illegal run transition for {run_id} from {from:?}: {reason}")]
     IllegalRunTransition {
         run_id: RunId,
         from: RunStatus,
-        to: RunStatus,
         reason: String,
     },
 

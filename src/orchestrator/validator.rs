@@ -10,8 +10,12 @@
 //!   7. On PR merged: transition task to Succeeded, write back to Beads.
 
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::time::sleep;
 
 use crate::core::events::OrchestratorEvent;
+use crate::core::task::TaskStatus;
 use crate::core::ids::{RunId, TaskId};
 use crate::core::interaction::{InteractionAction, InteractionRequest, InteractionRequestKind};
 use crate::core::run::TaskRun;
@@ -53,6 +57,47 @@ impl ValidatorCoordinator {
             sink,
             interaction_layers,
             events_tx,
+        }
+    }
+
+    /// Validation polling loop — mirrors the run() pattern of other subsystems.
+    ///
+    /// Each tick loads Validating tasks from the StateStore and advances CI checks
+    /// and PR-merge detection. Runs until the process exits.
+    pub async fn run(self: Arc<Self>, poll_interval: Duration) {
+        tracing::info!(
+            poll_interval_secs = poll_interval.as_secs(),
+            "Validator loop starting"
+        );
+        loop {
+            match self.store.active_tasks().await {
+                Ok(tasks) => {
+                    for task in tasks {
+                        if task.status != TaskStatus::Validating {
+                            continue;
+                        }
+                        let Some(run_id) = task.active_run_id.clone() else {
+                            continue;
+                        };
+                        if let Err(e) = self.check_ci(&task.spec.id, &run_id).await {
+                            tracing::warn!(
+                                task_id = %task.spec.id,
+                                run_id = %run_id,
+                                "CI check failed: {e}"
+                            );
+                        }
+                        if let Err(e) = self.check_pr_merged(&task.spec.id, &run_id).await {
+                            tracing::warn!(
+                                task_id = %task.spec.id,
+                                run_id = %run_id,
+                                "PR merge check failed: {e}"
+                            );
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("Validation loop failed to load active tasks: {e}"),
+            }
+            sleep(poll_interval).await;
         }
     }
 
@@ -101,12 +146,15 @@ impl ValidatorCoordinator {
         let branch = run
             .remote_branch
             .clone()
-            .or_else(|| {
-                run.worktree_path
-                    .as_ref()
-                    .map(|_| format!("task/{}", task_id.as_str()))
-            })
             .unwrap_or_else(|| format!("task/{}", task_id.as_str()));
+
+        if let Some(worktree_path) = run.worktree_path.as_deref() {
+            let github_token =
+                std::env::var(&self.workflow.execution.github_token_env).unwrap_or_default();
+            self.repo
+                .push_branch(std::path::Path::new(worktree_path), &branch, &github_token)
+                .await?;
+        }
 
         let (pr_number, pr_url) = self.repo.create_pr(&branch, &pr_title, &pr_body).await?;
 
@@ -127,13 +175,7 @@ impl ValidatorCoordinator {
             "PR created, entering CI validation"
         );
 
-        // Step 3: Check if human approval is required before merge.
-        if record.spec.always_human_review || !self.workflow.merge.auto_merge {
-            self.request_approval(task_id, run_id, pr_number, &pr_url)
-                .await?;
-        }
-        // Otherwise, auto-merge will be triggered by the monitor once CI passes.
-
+        // CI/merge decisions are handled by the validation polling loop.
         Ok(())
     }
 
@@ -144,6 +186,10 @@ impl ValidatorCoordinator {
         };
 
         let Some(pr_number) = run.pr_number else {
+            return Ok(());
+        };
+
+        let Some(record) = self.store.get_task(task_id).await? else {
             return Ok(());
         };
 
@@ -164,6 +210,7 @@ impl ValidatorCoordinator {
                 tracing::info!(task_id = %task_id, pr_number, "CI passing");
 
                 if self.workflow.merge.auto_merge
+                    && !record.spec.always_human_review
                     && !record_requires_human_approval(&run, &self.workflow, &diff)
                 {
                     self.trigger_merge(task_id, run_id, pr_number).await?;
@@ -184,10 +231,6 @@ impl ValidatorCoordinator {
                 );
 
                 // Check retry budget.
-                let Some(record) = self.store.get_task(task_id).await? else {
-                    return Ok(());
-                };
-
                 if record.attempt < self.workflow.retry.max_attempts {
                     tracing::info!(
                         task_id = %task_id,
@@ -202,6 +245,10 @@ impl ValidatorCoordinator {
                         },
                     )?;
                     self.store.upsert_task(&updated).await?;
+                    let _ = self
+                        .events_tx
+                        .send(OrchestratorEvent::dispatch_ready(task_id.clone()))
+                        .await;
                 } else {
                     tracing::warn!(
                         task_id = %task_id,
@@ -302,6 +349,10 @@ impl ValidatorCoordinator {
                 },
             )?;
             self.store.upsert_task(record).await?;
+            let _ = self
+                .events_tx
+                .send(OrchestratorEvent::dispatch_ready(record.spec.id.clone()))
+                .await;
         }
 
         Ok(())
@@ -314,9 +365,14 @@ impl ValidatorCoordinator {
         pr_number: u32,
         pr_url: &str,
     ) -> anyhow::Result<()> {
-        let Some(record) = self.store.get_task(task_id).await? else {
+        let Some(mut record) = self.store.get_task(task_id).await? else {
             return Ok(());
         };
+
+        if matches!(record.status, crate::core::task::TaskStatus::Validating) {
+            record = apply_transition(&record, Transition::RequireHumanInput)?;
+            self.store.upsert_task(&record).await?;
+        }
 
         let req = InteractionRequest::new(
             task_id.clone(),
@@ -349,6 +405,20 @@ impl ValidatorCoordinator {
         }
 
         Ok(())
+    }
+
+    pub async fn handle_human_approved(
+        &self,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> anyhow::Result<()> {
+        let Some(run) = self.store.get_run(run_id).await? else {
+            return Ok(());
+        };
+        let Some(pr_number) = run.pr_number else {
+            return Ok(());
+        };
+        self.trigger_merge(task_id, run_id, pr_number).await
     }
 
     async fn trigger_merge(

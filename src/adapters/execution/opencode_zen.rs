@@ -5,7 +5,7 @@
 //!      prompt (base64), callback URL, and GitHub branch as JSON.
 //!   2. `observe()` GETs the session status to detect progress via cursor changes.
 //!   3. `cancel()` DELETEs the session.
-//!   4. Completion is signaled by a callback POST to Thala's gateway.
+//!   4. Completion is signaled by a callback POST to Thala.
 //!
 //! Required environment variables:
 //!   - `OPENCODE_API_KEY`  — OpenCode Zen API key (opencode.ai/settings)
@@ -188,7 +188,11 @@ impl ExecutionBackend for OpenCodeZenBackend {
         })
     }
 
-    async fn observe(&self, handle: &WorkerHandle) -> Result<RunObservation, ThalaError> {
+    async fn observe(
+        &self,
+        handle: &WorkerHandle,
+        _prev_cursor: Option<&str>,
+    ) -> Result<RunObservation, ThalaError> {
         let api_key = Self::api_key().unwrap_or_default();
         let url = format!("{}/sessions/{}", self.config.base_url, handle.job_id);
 
@@ -211,6 +215,7 @@ impl ExecutionBackend for OpenCodeZenBackend {
             return Ok(RunObservation {
                 cursor: "deleted".into(),
                 is_alive: false,
+                terminal_status: None,
                 observed_at: chrono::Utc::now(),
             });
         }
@@ -224,7 +229,9 @@ impl ExecutionBackend for OpenCodeZenBackend {
 
         // Response: { "id": "oz-...", "status": "queued|running|completed|failed", "output_cursor": "..." }
         let status = data["status"].as_str().unwrap_or("unknown");
-        let is_alive = matches!(status, "queued" | "running" | "starting");
+        let terminal_status = status_to_terminal(status);
+        let is_alive =
+            terminal_status.is_none() && matches!(status, "queued" | "running" | "starting");
 
         // Use the server-provided output cursor when present; fall back to status.
         let cursor = data["output_cursor"].as_str().unwrap_or(status).to_string();
@@ -232,6 +239,7 @@ impl ExecutionBackend for OpenCodeZenBackend {
         Ok(RunObservation {
             cursor,
             is_alive,
+            terminal_status,
             observed_at: chrono::Utc::now(),
         })
     }
@@ -263,7 +271,33 @@ impl ExecutionBackend for OpenCodeZenBackend {
     }
 }
 
+fn status_to_terminal(status: &str) -> Option<crate::core::run::RunStatus> {
+    match status {
+        "completed" | "succeeded" => Some(crate::core::run::RunStatus::Completed),
+        "failed" | "error" => Some(crate::core::run::RunStatus::Failed),
+        "cancelled" | "canceled" => Some(crate::core::run::RunStatus::Cancelled),
+        _ => None,
+    }
+}
+
 fn base64_encode(s: &str) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::status_to_terminal;
+    use crate::core::run::RunStatus;
+
+    #[test]
+    fn maps_terminal_statuses() {
+        assert_eq!(status_to_terminal("completed"), Some(RunStatus::Completed));
+        assert_eq!(status_to_terminal("succeeded"), Some(RunStatus::Completed));
+        assert_eq!(status_to_terminal("failed"), Some(RunStatus::Failed));
+        assert_eq!(status_to_terminal("error"), Some(RunStatus::Failed));
+        assert_eq!(status_to_terminal("cancelled"), Some(RunStatus::Cancelled));
+        assert_eq!(status_to_terminal("canceled"), Some(RunStatus::Cancelled));
+        assert_eq!(status_to_terminal("running"), None);
+    }
 }

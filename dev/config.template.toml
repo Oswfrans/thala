@@ -16,17 +16,6 @@ workspace_root         = "REPLACE_WORKSPACE_ROOT"
 planning_model         = "claude-sonnet-4-6"
 api_base_url           = "https://opencode.ai/zen/v1"
 
-[notion]
-enabled         = false
-api_key         = ""
-database_id     = ""
-status_property = "Status"
-input_property  = "Input"
-result_property = "Result"
-status_pending  = "Todo"
-status_running  = "In Progress"
-status_done     = "Done"
-
 [channels_config.discord]
 bot_token     = "REPLACE_DISCORD_BOT_TOKEN"
 allowed_users = ["*"]

@@ -13,21 +13,18 @@ The function:
 2. Clones the public product repo at the task branch
 3. Reads the prompt from .thala/prompts/<task_id>.md
 4. Runs OpenCode with the task prompt
-5. Returns a git patch to Thala
-6. POSTs an authenticated completion callback to the Thala gateway
+5. Commits and pushes changes back to the task branch
+6. POSTs an authenticated completion callback to Thala
 
 Required env vars (passed via --env or set in Modal secrets):
-    THALA_TASK_ID          Notion task ID (e.g. "MKT-42")
-    THALA_TASK_BRANCH      git branch containing the prompt
+    THALA_RUN_ID           Thala run ID
+    THALA_TASK_ID          task ID (e.g. "MKT-42")
+    THALA_TASK_BRANCH      git branch to clone and push
     THALA_GITHUB_REPO      "org/repo" of the product repo
-    THALA_CALLBACK_URL     Thala gateway callback endpoint
+    THALA_CALLBACK_URL     Thala callback endpoint
     THALA_RUN_TOKEN        Per-run bearer token for callback auth
     THALA_MODEL            OpenCode model string
     OPENROUTER_API_KEY   (or OPENAI_API_KEY / ANTHROPIC_API_KEY)
-
-Note: GitHub credentials are intentionally not sent to the worker. This worker
-can clone public repositories; private-repo support requires a Thala-side source
-bundle/proxy so GitHub authority stays in the orchestrator.
 
 Usage from WORKFLOW.md worker config:
     worker:
@@ -89,20 +86,20 @@ app = modal.App("thala-worker", image=worker_image)
 def _send_callback(
     callback_url: str,
     run_token: str,
+    run_id: str,
     task_id: str,
     status: str,
     exit_code: int,
     error_message: str | None,
-    patch_base64: str | None = None,
 ) -> None:
-    """POST a completion callback to the Thala gateway."""
+    """POST a completion callback to the Thala."""
     body = json.dumps(
         {
             "task_id": task_id,
+            "run_id": run_id,
             "status": status,
             "exit_code": exit_code,
             "error_message": error_message,
-            "patch_base64": patch_base64,
         }
     ).encode()
 
@@ -122,6 +119,26 @@ def _send_callback(
         print(f"[thala-worker] WARNING: callback failed: {exc}", file=sys.stderr)
 
 
+def _commit_and_push(task_id: str, task_branch: str) -> str | None:
+    subprocess.run(["git", "config", "user.email", "thala-worker@example.invalid"], check=True)
+    subprocess.run(["git", "config", "user.name", "Thala Worker"], check=True)
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        check=True,
+        stdout=subprocess.PIPE,
+    )
+    if not status.stdout.strip():
+        print("[thala-worker] No changes to commit")
+        return None
+
+    subprocess.run(["git", "add", "-A"], check=True)
+    subprocess.run(["git", "commit", "-m", f"chore: apply thala task {task_id}"], check=True)
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE)
+    subprocess.run(["git", "push", "origin", f"HEAD:{task_branch}"], check=True)
+    return sha.stdout.decode().strip()
+
+
 @app.function(
     timeout=int(os.environ.get("THALA_WORKER_TIMEOUT_SECS", "3600")),
     secrets=[_task_secret],
@@ -139,6 +156,7 @@ def run_worker() -> int:
         export THALA_TASK_ID=TEST-1 THALA_GITHUB_REPO=org/repo ...
         modal run dev/infra/modal_worker.py::run_worker
     """
+    run_id = os.environ.get("THALA_RUN_ID", "")
     task_id = os.environ["THALA_TASK_ID"]
     task_branch = os.environ["THALA_TASK_BRANCH"]
     github_repo = os.environ["THALA_GITHUB_REPO"]
@@ -187,7 +205,7 @@ def run_worker() -> int:
         if not prompt_path.exists():
             msg = f"Prompt not found: neither THALA_PROMPT_B64 nor {prompt_path}"
             print(f"ERROR: {msg}", file=sys.stderr)
-            _send_callback(callback_url, run_token, task_id, "error", 1, msg)
+            _send_callback(callback_url, run_token, run_id, task_id, "error", 1, msg)
             return 1
         prompt = prompt_path.read_text()
 
@@ -221,35 +239,28 @@ def run_worker() -> int:
         if result.returncode != 0:
             print("WARNING: after_run hook failed (continuing)", file=sys.stderr)
 
-    # ── Produce patch + signal file ───────────────────────────────────────────
-    subprocess.run(["git", "config", "user.email", "thala-worker@example.invalid"], check=True)
-    subprocess.run(["git", "config", "user.name", "Thala Worker"], check=True)
-
-    signal_dir = work_dir / ".thala" / "signals"
-    signal_dir.mkdir(parents=True, exist_ok=True)
-    (signal_dir / f"{task_id}.signal").write_text("DONE\n")
-
-    diff_result = subprocess.run(
-        ["git", "diff", "--binary", "HEAD"],
-        check=True,
-        stdout=subprocess.PIPE,
-    )
-    patch_base64 = base64.b64encode(diff_result.stdout).decode()
-    if not diff_result.stdout:
-        print("[thala-worker] No changes to commit")
-
-    # ── Send callback ─────────────────────────────────────────────────────────
+    # ── Commit, push, and notify Thala ────────────────────────────────────────
     if exit_code == 0:
-        _send_callback(callback_url, run_token, task_id, "success", 0, None, patch_base64)
+        try:
+            commit_sha = _commit_and_push(task_id, task_branch)
+            if commit_sha:
+                print(f"[thala-worker] Pushed commit {commit_sha} to {task_branch}")
+        except subprocess.CalledProcessError as exc:
+            msg = f"commit/push failed with code {exc.returncode}"
+            print(f"ERROR: {msg}", file=sys.stderr)
+            _send_callback(callback_url, run_token, run_id, task_id, "error", exc.returncode, msg)
+            return exc.returncode or 1
+
+        _send_callback(callback_url, run_token, run_id, task_id, "success", 0, None)
     else:
         _send_callback(
             callback_url,
             run_token,
+            run_id,
             task_id,
             "error",
             exit_code,
             f"OpenCode exited with code {exit_code}",
-            patch_base64,
         )
 
     return exit_code

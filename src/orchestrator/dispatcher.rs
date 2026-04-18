@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use crate::core::events::OrchestratorEvent;
 use crate::core::ids::{RunId, TaskId};
 use crate::core::run::TaskRun;
-use crate::core::task::TaskRecord;
+use crate::core::task::{TaskRecord, TaskStatus};
 use crate::core::transitions::{apply_transition, Transition};
 use crate::core::workflow::WorkflowConfig;
 use crate::orchestrator::prompt_builder::{fallback_prompt, PromptBuilder};
@@ -84,12 +84,20 @@ impl Dispatcher {
         // Load or create the task record.
         let mut record = self.load_or_create_record(&task_id).await?;
 
-        // Transition to Dispatching.
-        record = apply_transition(&record, Transition::BeginDispatching)?;
+        // Extract and clear reroute hint before transitioning so both changes
+        // land in the same upsert below.
+        let reroute_hint = record.reroute_hint.take();
+
+        // Transition to Dispatching. Retry and human-recovery paths can already
+        // be in Dispatching; in that case the dispatcher owns the existing claim.
+        if record.status != TaskStatus::Dispatching {
+            record = apply_transition(&record, Transition::BeginDispatching)?;
+        }
+        // Always upsert here: persists both the status change and the cleared hint.
         self.store.upsert_task(&record).await?;
 
         // Determine backend — honour a reroute hint from a human action if set.
-        let backend_kind = if let Some(hint) = record.reroute_hint.clone() {
+        let backend_kind = if let Some(hint) = reroute_hint {
             tracing::info!(
                 task_id = %task_id,
                 backend = %hint.as_str(),
@@ -101,12 +109,6 @@ impl Dispatcher {
                 .route(&record.spec, &self.workflow, record.attempt)
         };
         let backend = self.router.backend(&backend_kind);
-
-        // Clear the reroute hint so it is not re-applied on subsequent retries.
-        if record.reroute_hint.is_some() {
-            record.reroute_hint = None;
-            self.store.upsert_task(&record).await?;
-        }
 
         // Create the run record.
         let run_id = RunId::new_v4();
@@ -134,9 +136,15 @@ impl Dispatcher {
             let github_token =
                 std::env::var(&self.workflow.execution.github_token_env).unwrap_or_default();
 
-            self.repo
+            if let Err(e) = self
+                .repo
                 .push_branch(&self.config.workspace_root, &branch, &github_token)
-                .await?;
+                .await
+            {
+                self.mark_dispatch_failed(&task_id, format!("failed to push branch: {e}"))
+                    .await?;
+                return Err(e.into());
+            }
 
             run.remote_branch = Some(branch.clone());
             Some(branch)
@@ -160,6 +168,8 @@ impl Dispatcher {
                         task_id = %task_id,
                         "Tera template render failed — skipping dispatch: {e}"
                     );
+                    self.mark_dispatch_failed(&task_id, format!("template render failed: {e}"))
+                        .await?;
                     return Err(e.into());
                 }
             }
@@ -181,6 +191,7 @@ impl Dispatcher {
         let req = LaunchRequest {
             run_id: run_id.as_str().to_string(),
             task_id: task_id.as_str().to_string(),
+            attempt: run.attempt,
             product: self.config.product.clone(),
             prompt,
             model,
@@ -197,7 +208,14 @@ impl Dispatcher {
             // before_cleanup is Thala-side only — not forwarded to the remote worker
         };
 
-        let launched = backend.launch(req).await?;
+        let launched = match backend.launch(req).await {
+            Ok(launched) => launched,
+            Err(e) => {
+                self.mark_dispatch_failed(&task_id, format!("backend launch failed: {e}"))
+                    .await?;
+                return Err(e.into());
+            }
+        };
 
         // Update the run with handle and worktree info.
         run.handle = Some(launched.handle.clone());
@@ -231,6 +249,31 @@ impl Dispatcher {
                 run_id,
                 backend_kind,
             ))
+            .await;
+
+        Ok(())
+    }
+
+    async fn mark_dispatch_failed(&self, task_id: &TaskId, reason: String) -> anyhow::Result<()> {
+        if let Some(record) = self.store.get_task(task_id).await? {
+            if record.status == TaskStatus::Dispatching {
+                let updated = apply_transition(
+                    &record,
+                    Transition::DispatchFailed {
+                        reason: reason.clone(),
+                    },
+                )?;
+                self.store.upsert_task(&updated).await?;
+            }
+        }
+
+        let _ = self
+            .events_tx
+            .send(OrchestratorEvent::RunLaunchFailed {
+                task_id: task_id.clone(),
+                reason,
+                at: chrono::Utc::now(),
+            })
             .await;
 
         Ok(())

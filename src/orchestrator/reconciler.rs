@@ -188,7 +188,7 @@ impl Reconciler {
             };
 
             let backend = self.router.backend(&run.backend);
-            match backend.observe(handle).await {
+            match backend.observe(handle, run.last_observation_cursor.as_deref()).await {
                 Ok(obs) => {
                     if !obs.is_alive {
                         // Worker died while Thala was offline.

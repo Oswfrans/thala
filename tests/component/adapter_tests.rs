@@ -15,8 +15,28 @@ use thala::core::ids::{RunId, TaskId};
 use thala::core::run::TaskRun;
 use thala::core::run::{ExecutionBackendKind, WorkerHandle};
 use thala::core::validation::ValidatorKind;
-use thala::ports::execution::ExecutionBackend;
+use thala::ports::execution::{ExecutionBackend, LaunchRequest};
 use thala::ports::validator::Validator;
+
+fn launch_request_for_backend() -> LaunchRequest {
+    LaunchRequest {
+        run_id: "run-test".into(),
+        task_id: "bd-test".into(),
+        attempt: 1,
+        product: "test-product".into(),
+        prompt: "Do the task".into(),
+        model: "test-model".into(),
+        workspace_root: std::path::PathBuf::from("/tmp/test-product"),
+        remote_branch: Some("task/bd-test".into()),
+        callback_url: None,
+        callback_token: Some("callback-token".into()),
+        github_repo: Some("example/repo".into()),
+        github_token: Some("gh-token".into()),
+        after_create_hook: None,
+        before_run_hook: None,
+        after_run_hook: None,
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LocalBackend tests
@@ -47,6 +67,20 @@ fn modal_backend_reports_correct_kind() {
 }
 
 #[tokio::test]
+async fn modal_backend_requires_callback_url_before_spawning_cli() {
+    let config = ModalConfig {
+        app_file: "dev/infra/modal_worker.py::run_worker".into(),
+        environment: None,
+    };
+    let backend = ModalBackend::new(config);
+    let err = backend
+        .launch(launch_request_for_backend())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("callback_url is required"));
+}
+
+#[tokio::test]
 async fn modal_backend_observe_falls_back_gracefully() {
     // When the `modal` CLI is not available, observe() falls back to returning
     // the job_id as cursor (non-changing) and is_alive = true so that a missing
@@ -61,11 +95,11 @@ async fn modal_backend_observe_falls_back_gracefully() {
         backend: ExecutionBackendKind::Modal,
     };
 
-    let obs = backend.observe(&handle).await.unwrap();
+    let obs = backend.observe(&handle, None).await.unwrap();
 
-    // Fallback: cursor is the job_id (unchanged), assumed alive.
-    assert_eq!(obs.cursor, "ap-test123");
-    assert!(obs.is_alive);
+    // Missing CLI, timeout, or a non-existent remote app should all return a
+    // structured observation instead of panicking or hanging.
+    assert!(!obs.cursor.is_empty());
     assert!(obs.observed_at.timestamp() > 0);
 }
 
@@ -94,10 +128,10 @@ async fn modal_backend_cancel_is_noop() {
 #[test]
 fn cloudflare_backend_reports_correct_kind() {
     let config = CloudflareConfig {
-        account_id: "test-account".into(),
-        image: "test-image".into(),
-        vcpus: None,
-        memory_mb: None,
+        base_url: "http://localhost:8787".into(),
+        auth_token: "test-token".into(),
+        max_duration_seconds: 1_800,
+        allow_network: true,
     };
     let backend = CloudflareBackend::new(config);
     assert_eq!(backend.kind(), ExecutionBackendKind::Cloudflare);
@@ -106,14 +140,12 @@ fn cloudflare_backend_reports_correct_kind() {
 }
 
 #[tokio::test]
-async fn cloudflare_backend_cancel_handles_missing_container() {
-    // cancel() uses DELETE which may fail if container already gone
-    // but the implementation catches the error and returns Ok(())
+async fn cloudflare_backend_cancel_requires_config_but_does_not_panic() {
     let config = CloudflareConfig {
-        account_id: "test-account".into(),
-        image: "test-image".into(),
-        vcpus: None,
-        memory_mb: None,
+        base_url: String::new(),
+        auth_token: String::new(),
+        max_duration_seconds: 1_800,
+        allow_network: true,
     };
     let backend = CloudflareBackend::new(config);
     let handle = WorkerHandle {
@@ -121,18 +153,27 @@ async fn cloudflare_backend_cancel_handles_missing_container() {
         backend: ExecutionBackendKind::Cloudflare,
     };
 
-    // Without CF_API_TOKEN set, this will fail the API call but should handle gracefully
-    // or if token is missing entirely, it should still not panic
-    std::env::remove_var("CF_API_TOKEN");
-
-    // This may fail due to missing token, but shouldn't panic
-    let _ = backend.cancel(&handle).await;
-    // Test passes if we get here without panic
+    let result = backend.cancel(&handle).await;
+    assert!(result.is_err());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OpenCodeZenBackend tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn opencode_zen_backend_requires_callback_url_before_api_call() {
+    std::env::set_var("OPENCODE_API_KEY", "test-key");
+    let backend = OpenCodeZenBackend::new(OpenCodeZenConfig {
+        base_url: "https://opencode.invalid/zen/v1".into(),
+    });
+    let err = backend
+        .launch(launch_request_for_backend())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("callback_url is required"));
+    std::env::remove_var("OPENCODE_API_KEY");
+}
 
 #[test]
 fn opencode_zen_backend_reports_correct_kind() {
@@ -173,7 +214,7 @@ async fn opencode_zen_backend_observe_without_key_returns_gracefully() {
         backend: ExecutionBackendKind::OpenCodeZen,
     };
     // Should not panic — either returns Ok (failed lookup → deleted) or Err.
-    let _ = backend.observe(&handle).await;
+    let _ = backend.observe(&handle, None).await;
 }
 
 #[tokio::test]
@@ -194,25 +235,25 @@ async fn opencode_zen_backend_cancel_is_noop_without_credentials() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn cloudflare_config_from_env_reads_account_id() {
-    std::env::set_var("CF_ACCOUNT_ID", "test-account-123");
-    std::env::set_var("CF_WORKER_IMAGE", "registry.example.com/worker:latest");
+fn cloudflare_config_from_env_reads_control_plane_auth() {
+    std::env::set_var("THALA_CF_BASE_URL", "http://localhost:8787");
+    std::env::set_var("THALA_CF_TOKEN", "test-token");
     let config = CloudflareConfig::from_env();
-    assert_eq!(config.account_id, "test-account-123");
-    assert_eq!(config.image, "registry.example.com/worker:latest");
-    std::env::remove_var("CF_ACCOUNT_ID");
-    std::env::remove_var("CF_WORKER_IMAGE");
+    assert_eq!(config.base_url, "http://localhost:8787");
+    assert_eq!(config.auth_token, "test-token");
+    std::env::remove_var("THALA_CF_BASE_URL");
+    std::env::remove_var("THALA_CF_TOKEN");
 }
 
 #[test]
 fn cloudflare_config_from_env_parses_resource_limits() {
-    std::env::set_var("CF_WORKER_VCPUS", "2");
-    std::env::set_var("CF_WORKER_MEMORY_MB", "1024");
+    std::env::set_var("THALA_CF_MAX_DURATION_SECONDS", "2400");
+    std::env::set_var("THALA_CF_ALLOW_NETWORK", "false");
     let config = CloudflareConfig::from_env();
-    assert_eq!(config.vcpus, Some(2));
-    assert_eq!(config.memory_mb, Some(1024));
-    std::env::remove_var("CF_WORKER_VCPUS");
-    std::env::remove_var("CF_WORKER_MEMORY_MB");
+    assert_eq!(config.max_duration_seconds, 2400);
+    assert!(!config.allow_network);
+    std::env::remove_var("THALA_CF_MAX_DURATION_SECONDS");
+    std::env::remove_var("THALA_CF_ALLOW_NETWORK");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

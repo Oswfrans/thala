@@ -8,6 +8,7 @@
 //! purpose-specific subsystems. Its job is wiring and lifecycle management.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
@@ -17,6 +18,7 @@ use crate::core::interaction::{
 };
 use crate::core::task::TaskStatus;
 use crate::core::workflow::WorkflowConfig;
+use crate::orchestrator::callback_server::{CallbackServer, CallbackServerConfig};
 use crate::orchestrator::dispatcher::{Dispatcher, DispatcherConfig};
 use crate::orchestrator::human_loop::{HumanLoop, HumanLoopConfig};
 use crate::orchestrator::monitor::{Monitor, MonitorConfig};
@@ -95,6 +97,19 @@ impl OrchestratorEngine {
         // Event channel — subsystems communicate via events.
         let (events_tx, mut events_rx) = mpsc::channel::<OrchestratorEvent>(256);
 
+        if self.config.workflow.execution.callback_base_url.is_some() {
+            let callback_server = CallbackServer::new(
+                CallbackServerConfig::from_env()?,
+                self.store.clone(),
+                events_tx.clone(),
+            );
+            tokio::spawn(async move {
+                if let Err(e) = callback_server.run().await {
+                    tracing::error!("Worker callback receiver failed: {e}");
+                }
+            });
+        }
+
         // Step 1: Reconcile state from previous run.
         let reconciler = Reconciler::new(
             self.store.clone(),
@@ -155,6 +170,8 @@ impl OrchestratorEngine {
         tokio::spawn(async move { scheduler.run().await });
         tokio::spawn(async move { monitor.run().await });
         tokio::spawn(async move { human_loop.run().await });
+        let v = validator.clone();
+        tokio::spawn(async move { v.run(Duration::from_secs(60)).await });
 
         let store = self.store.clone();
         let interaction_layers = self.interaction_layers.clone();
@@ -245,7 +262,9 @@ async fn route_event(
         // Route InteractionResolved: if the human decision moved the task back to
         // Dispatching (Retry or Reroute), trigger immediate re-dispatch without
         // waiting for the next scheduler tick.
-        OrchestratorEvent::InteractionResolved { task_id, .. } => {
+        OrchestratorEvent::InteractionResolved {
+            task_id, run_id, ..
+        } => {
             tracing::debug!(task_id = %task_id, "Routing InteractionResolved");
 
             if let Ok(Some(record)) = store.get_task(&task_id).await {
@@ -256,6 +275,14 @@ async fn route_event(
                     );
                     if let Err(e) = dispatcher.dispatch(task_id).await {
                         tracing::error!("Re-dispatch after interaction failed: {e}");
+                    }
+                } else if record.status == TaskStatus::Validating {
+                    tracing::info!(
+                        task_id = %task_id,
+                        "Task approved by human — merging approved PR"
+                    );
+                    if let Err(e) = validator.handle_human_approved(&task_id, &run_id).await {
+                        tracing::error!("Human-approved merge failed: {e}");
                     }
                 }
             }
@@ -284,3 +311,4 @@ async fn route_event(
 
     Ok(())
 }
+

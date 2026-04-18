@@ -22,7 +22,7 @@ pub enum ExecutionBackendKind {
     Local,
     /// Serverless container on Modal (via modal CLI).
     Modal,
-    /// Container on Cloudflare Containers (via REST API).
+    /// Cloudflare Worker/Durable Object control plane backed by Sandbox containers.
     Cloudflare,
     /// Managed worker session on OpenCode Zen (opencode.ai).
     #[serde(rename = "opencode-zen")]
@@ -52,7 +52,7 @@ impl ExecutionBackendKind {
 ///
 /// - Local: tmux session name (e.g. "thala-example-app-bd-a1b2")
 /// - Modal: function call ID (e.g. "fc-abc123def456")
-/// - Cloudflare: container instance ID
+/// - Cloudflare: control-plane remote run ID
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerHandle {
     pub job_id: String,
@@ -73,6 +73,13 @@ pub struct RunObservation {
 
     /// Whether the job/container/session is still alive according to the backend.
     pub is_alive: bool,
+
+    /// Terminal status reported by a polling backend.
+    ///
+    /// Callback and signal-file backends leave this as None. Polling-first
+    /// remote backends use it to report completion without relying on a
+    /// callback path.
+    pub terminal_status: Option<RunStatus>,
 
     /// When this observation was taken.
     pub observed_at: DateTime<Utc>,
@@ -136,55 +143,43 @@ impl RunStatus {
 /// - Retries create a NEW TaskRun, never mutating this one's backend or handle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRun {
+    // ── Identity ──────────────────────────────────────────────────────────────
     pub run_id: RunId,
     pub task_id: TaskId,
-
-    /// Which attempt number this run corresponds to (copied from TaskRecord.attempt
-    /// at dispatch time).
+    /// Copied from TaskRecord.attempt at dispatch time.
     pub attempt: u32,
 
+    // ── Execution state ───────────────────────────────────────────────────────
     pub status: RunStatus,
     pub backend: ExecutionBackendKind,
-
     /// Set once the backend has successfully spawned the worker.
     pub handle: Option<WorkerHandle>,
-
     /// Absolute path to the local git worktree (Local backend only).
     pub worktree_path: Option<String>,
-
     /// Branch name pushed to origin (remote backends only).
     pub remote_branch: Option<String>,
+    /// SHA-256 of the per-run callback bearer token (raw token is sent to worker only).
+    pub callback_token_hash: Option<String>,
 
-    /// PR number created during validation.
-    pub pr_number: Option<u32>,
-
-    /// Full PR URL (e.g. "https://github.com/org/repo/pull/42").
-    pub pr_url: Option<String>,
-
-    /// When this run was created.
+    // ── Timing & stall detection ──────────────────────────────────────────────
     pub started_at: DateTime<Utc>,
-
-    /// When this run record was last updated.
     pub updated_at: DateTime<Utc>,
-
-    /// When this run entered a terminal state.
     pub completed_at: Option<DateTime<Utc>>,
-
-    /// When output last changed. Used for stall detection.
+    /// When output last changed; drives stall detection in the monitor.
     pub last_activity_at: Option<DateTime<Utc>>,
-
-    /// Cursor from the last poll. Changes when output changes.
+    /// Opaque cursor from the last backend poll; changes when output changes.
     pub last_observation_cursor: Option<String>,
 
-    /// Feedback injected into the re-run prompt when review AI rejects a diff.
+    // ── Validation state (populated after execution completes) ────────────────
+    /// PR number created during validation.
+    pub pr_number: Option<u32>,
+    /// Full PR URL (e.g. "https://github.com/org/repo/pull/42").
+    pub pr_url: Option<String>,
+    /// Feedback from a failed review AI pass; injected into the re-run prompt.
     pub review_feedback: Option<String>,
-
-    /// Number of review-feedback cycles completed for this run.
+    /// Number of review-feedback cycles for THIS run. Resets to 0 on each new
+    /// TaskRun (i.e. each retry attempt), so max_review_cycles is per-attempt.
     pub review_cycle: u32,
-
-    /// SHA-256 of the per-run callback bearer token.
-    /// Only the hash is persisted; the raw token is sent to the worker.
-    pub callback_token_hash: Option<String>,
 }
 
 impl TaskRun {
@@ -204,16 +199,16 @@ impl TaskRun {
             handle: None,
             worktree_path: None,
             remote_branch: None,
-            pr_number: None,
-            pr_url: None,
+            callback_token_hash: None,
             started_at: now,
             updated_at: now,
             completed_at: None,
             last_activity_at: None,
             last_observation_cursor: None,
+            pr_number: None,
+            pr_url: None,
             review_feedback: None,
             review_cycle: 0,
-            callback_token_hash: None,
         }
     }
 
