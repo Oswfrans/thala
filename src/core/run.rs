@@ -24,9 +24,6 @@ pub enum ExecutionBackendKind {
     Modal,
     /// Cloudflare Worker/Durable Object control plane backed by Sandbox containers.
     Cloudflare,
-    /// Managed worker session on OpenCode Zen (opencode.ai).
-    #[serde(rename = "opencode-zen")]
-    OpenCodeZen,
 }
 
 impl ExecutionBackendKind {
@@ -35,7 +32,6 @@ impl ExecutionBackendKind {
             Self::Local => "local",
             Self::Modal => "modal",
             Self::Cloudflare => "cloudflare",
-            Self::OpenCodeZen => "opencode-zen",
         }
     }
 

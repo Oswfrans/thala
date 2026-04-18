@@ -29,8 +29,8 @@ See [QUICKSTART.md](docs/QUICKSTART.md) for a first-run walkthrough. Use
 
 Two-tier:
 
-- **Tier 1 — Thala (this repo):** Reads tasks from Beads, assembles context-rich prompts, spawns and monitors OpenCode workers, handles validation, retries, and escalation via Discord/Slack.
-- **Tier 2 — Workers:** OpenCode sessions (Kimi K2.5 / Claude Sonnet) each in an isolated git worktree. See only code and their task prompt — never Thala's orchestration context.
+- **Tier 1 — Thala (this repo):** Reads tasks from Beads, assembles context-rich prompts, spawns and monitors OpenCode workers, handles validation, retries, and escalation via Discord and/or Slack. State is persisted in SQLite (`~/.local/share/thala/state.db`).
+- **Tier 2 — Workers:** OpenCode sessions each in an isolated git worktree or remote container. See only code and their task prompt — never Thala's orchestration context.
 
 ### Worker backends
 
@@ -39,11 +39,10 @@ Workers run in one of four backends, configured per-product in `WORKFLOW.md`:
 | Backend | When to use |
 |---|---|
 | `local` (default) | Development, single-machine deployments. Workers run in tmux git worktrees on the same host. |
-| `opencode-zen` | Managed OpenCode Zen sessions. |
 | `modal` | Serverless cloud workers. Each task gets a fresh container on Modal; no local tmux or OpenCode needed. |
 | `cloudflare` | Cloudflare Containers. Suitable for mature workloads already on Cloudflare's platform. |
 
-Remote backends push the task branch to GitHub, run OpenCode in a managed container, and push changes back. Modal and OpenCode Zen report completion by signed callback; Cloudflare is polled through its Worker/Durable Object control plane.
+Remote backends push the task branch to GitHub, run OpenCode in a managed container, and push changes back. Modal reports completion by signed callback; Cloudflare is polled through its Worker/Durable Object control plane.
 
 See [examples/WORKFLOW.md](examples/WORKFLOW.md) for the workflow contract used by this repository.
 
@@ -58,6 +57,9 @@ cargo test
 
 # Full CI (runs in Docker)
 ./dev/ci.sh all
+
+# Debug logging
+./target/release/thala --log thala=debug,info --workflow /path/to/WORKFLOW.md run
 ```
 
 ## Acknowledgements

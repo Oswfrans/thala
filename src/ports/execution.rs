@@ -88,7 +88,7 @@ pub struct LaunchedRun {
 
 /// Abstraction over local and remote worker execution environments.
 ///
-/// Implementations include LocalBackend, ModalBackend, CloudflareBackend, and OpenCodeZenBackend.
+/// Implementations include LocalBackend, ModalBackend, and CloudflareBackend.
 #[async_trait]
 pub trait ExecutionBackend: Send + Sync {
     /// Which kind of backend this is.

@@ -11,10 +11,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use thala::adapters::beads::{BeadsTaskSink, BeadsTaskSource};
 use thala::adapters::execution::router::DefaultBackendRouter;
-use thala::adapters::execution::{
-    CloudflareBackend, LocalBackend, ModalBackend, ModalConfig, OpenCodeZenBackend,
-    OpenCodeZenConfig,
-};
+use thala::adapters::execution::{CloudflareBackend, LocalBackend, ModalBackend, ModalConfig};
 use thala::adapters::interaction::discord::{DiscordInteraction, DiscordInteractionConfig};
 use thala::adapters::interaction::slack::{SlackInteraction, SlackInteractionConfig};
 use thala::adapters::repo::GitRepoProvider;
@@ -132,13 +129,7 @@ async fn main() -> Result<()> {
     let local = Arc::new(LocalBackend::new());
     let modal = Arc::new(ModalBackend::new(ModalConfig::from_env()));
     let cloudflare = Arc::new(CloudflareBackend::from_env());
-    let opencode_zen = Arc::new(OpenCodeZenBackend::new(OpenCodeZenConfig::from_env()));
-    let router = Arc::new(DefaultBackendRouter::new(
-        local,
-        modal,
-        cloudflare,
-        opencode_zen,
-    ));
+    let router = Arc::new(DefaultBackendRouter::new(local, modal, cloudflare));
 
     // Data directory — used by both the state store and the Slack inbox.
     let state_dir = std::env::var("XDG_DATA_HOME")
@@ -307,13 +298,12 @@ fn run_onboard() -> Result<()> {
     let backend_idx = choose(
         "Which execution backend?",
         &[
-            "local   — tmux sessions on this host (no extra credentials)",
-            "opencode-zen — OpenCode Zen managed workers (OPENCODE_API_KEY)",
-            "cloudflare   — Cloudflare Sandbox control plane (THALA_CF_BASE_URL, THALA_CF_TOKEN)",
-            "modal        — Modal serverless containers (modal CLI)",
+            "local      — tmux sessions on this host (no extra credentials)",
+            "cloudflare — Cloudflare Sandbox control plane (THALA_CF_BASE_URL, THALA_CF_TOKEN)",
+            "modal      — Modal serverless containers (modal CLI)",
         ],
     );
-    let backend_names = ["local", "opencode-zen", "cloudflare", "modal"];
+    let backend_names = ["local", "cloudflare", "modal"];
     let backend = backend_names[backend_idx];
 
     if prompt_yes_no("Install missing CLIs and initialize Beads now?", true) {
@@ -324,18 +314,6 @@ fn run_onboard() -> Result<()> {
     }
 
     let (backend_block, env_note) = match backend {
-        "opencode-zen" => {
-            let cb = prompt(
-                "Callback base URL (public URL of this Thala instance)",
-                "https://thala.example.com",
-            );
-            (
-                format!(
-                    "\nexecution:\n  backend: opencode-zen\n  workspace_root: \"{workspace_root}\"\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN"
-                ),
-                "\nRequired env vars:\n  OPENCODE_API_KEY=sk-...\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_BIND=127.0.0.1:8788",
-            )
-        }
         "cloudflare" => (
             format!(
                 "\nexecution:\n  backend: cloudflare\n  workspace_root: \"{workspace_root}\"\n  github_token_env: THALA_GITHUB_TOKEN"
