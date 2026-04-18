@@ -8,7 +8,19 @@ Read this entire file before writing any code. The architecture is specific and 
 
 ## What this is
 
-**Thala** is an opinionated open-source agent orchestration kernel. It reads tasks from Beads, assembles context-rich prompts, spawns OpenCode workers across one of three execution backends (local tmux, Modal, Cloudflare), monitors those sessions, validates output, and handles retries and human escalation — all driven by a per-product `WORKFLOW.md` config file.
+**Thala** is an opinionated orchestration kernel for managed coding tasks. It is not a general-purpose agent framework.
+
+Its responsibility is to:
+
+1. Ingest canonical tasks from Beads
+2. Build execution context from repository state and workflow config
+3. Launch execution runs on a selected backend (local, Modal, Cloudflare)
+4. Monitor progress and detect stalls or failures
+5. Validate results
+6. Involve humans via Slack/Discord when required
+7. Finish, retry, reroute, or resolve tasks
+
+Thala separates task-level truth, runtime execution, and human interaction into distinct subsystems.
 
 ---
 
@@ -16,7 +28,7 @@ Read this entire file before writing any code. The architecture is specific and 
 
 **Tier 1 — Thala (this repo):** Orchestrator. Reads tasks from Beads, builds prompts, launches and monitors workers, handles state transitions, escalates to humans via Discord/Slack.
 
-**Tier 2 — Workers:** OpenCode sessions running on a configured backend. Each sees only the rendered prompt and the product codebase. Workers never see Thala's orchestration context.
+**Tier 2 — Workers:** Coding agent sessions running on a configured backend. Each sees only the rendered prompt and the product codebase. Workers never see Thala's orchestration context.
 
 ---
 
@@ -47,6 +59,69 @@ Full pre-PR validation (recommended):
 The `ci.sh` script runs inside Docker. Available sub-commands: `build-image`, `lint`, `lint-strict`, `lint-delta`, `test`, `test-component`, `test-integration`, `test-system`, `test-live`, `build`, `audit`, `deny`, `security`, `docker-smoke`, `all`, `clean`.
 
 Build profiles: `release` (size-optimized, fat LTO, single codegen unit), `release-fast` (parallel codegen), `ci` (thin LTO, full parallelism).
+
+---
+
+## Core Architecture
+
+The codebase is structured into four main layers:
+
+```
+core/           → domain model and pure logic (no I/O)
+ports/          → trait boundaries for external systems
+adapters/       → concrete implementations of ports
+orchestrator/   → application logic and execution loops
+```
+
+Design principles:
+- Keep the core small and explicit
+- Separate what the system *is* (core) from how it *connects* (adapters)
+- Model task lifecycle and run lifecycle explicitly
+- Keep external systems out of core logic
+- Prefer clarity over abstraction
+
+---
+
+## Canonical Sources of Truth
+
+**Beads (task-level truth)**
+
+Beads is the canonical system for task existence, metadata (title, description, priority, context), human-authored updates, and high-level task status. Thala reads tasks from Beads and may write updates back via a controlled interface.
+
+**Thala state store (runtime truth)**
+
+Thala maintains its own durable state for: task execution status (`TaskRecord`), execution attempts (`TaskRun`), worker handles and backend details, monitoring timestamps, and orchestration events. This state is not stored in Beads.
+
+---
+
+## Interaction Model
+
+Human interaction is a first-class subsystem, not just escalation.
+
+Thala may: notify humans of progress or issues, request approvals or decisions, request missing context, allow retries or rerouting, or allow manual resolution.
+
+```
+Thala → InteractionLayer → Slack/Discord → Human
+                                     ↓
+                              InteractionResolution
+                                     ↓
+                                   Thala
+```
+
+Core types: `InteractionRequest`, `InteractionAction` (approve, retry, cancel, etc.), `InteractionResolution`.
+
+Slack and Discord are interaction adapters — not sources of truth.
+
+---
+
+## Task Ingestion Model
+
+Tasks always become canonical via Beads.
+
+- Slack/Discord → intake adapter → Beads (TaskSink)
+- Beads → TaskSource → Thala
+
+Slack and Discord may create tasks, append context, or update task fields — but they do not create tasks directly inside Thala.
 
 ---
 
@@ -413,6 +488,18 @@ Enforced in the validator: if `task.product == "thala-core"` and the task reache
 
 ---
 
+## Non-Goals
+
+Thala is intentionally not:
+
+- A general-purpose multi-agent framework
+- A no-code automation platform
+- A plugin marketplace
+- A long-term memory system
+- A chat-first system
+
+---
+
 ## Definition of done for each integration
 
 Before any integration is considered complete:
@@ -444,6 +531,22 @@ No feature flags are currently defined. Do not add speculative features.
 - **High risk**: `src/core/**`, `src/orchestrator/**`, `src/ports/**`, `src/adapters/execution/**`, `.github/workflows/**`, access-control boundaries
 
 When uncertain, classify as higher risk.
+
+---
+
+## Development Guidelines
+
+When contributing:
+
+- Prefer deleting complexity over adding abstraction
+- Keep core logic pure and minimal
+- Keep adapters thin and focused
+- Do not leak: Slack/Discord payloads into core; Modal/Cloudflare specifics into core; Beads schema into core
+- Prefer explicit enums and structs
+- Avoid unnecessary generics or macros
+- Keep orchestration loops readable and small
+
+If unsure: choose the simpler, narrower design.
 
 ---
 
@@ -479,6 +582,14 @@ Branch/commit/PR rules:
 - Do not silently weaken security policy or access constraints
 - Do not add speculative config/feature flags "just in case"
 - Do not modify unrelated modules "while here"
+
+---
+
+## Mental Model
+
+> Beads defines what should be done.
+> Thala executes it.
+> Humans intervene when needed.
 
 ---
 
