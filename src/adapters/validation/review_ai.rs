@@ -3,14 +3,16 @@
 //! Sends the diff and task acceptance criteria to the manager model and
 //! returns Pass/Fail based on the model's assessment.
 //!
-//! The diff is obtained by running `git diff HEAD` in the worktree directory.
+//! The diff is obtained by running `git diff origin/main...HEAD` in the worktree
+//! directory to capture all changes on the task branch relative to main.
 //! For remote backends (no worktree), the diff will be empty and the review
-//! will assess based solely on the acceptance criteria and task context.
+//! will assess based solely on the acceptance criteria.
 
 use async_trait::async_trait;
 
 use crate::core::error::ThalaError;
 use crate::core::run::TaskRun;
+use crate::core::task::TaskSpec;
 use crate::core::validation::{ValidationOutcome, ValidatorKind};
 use crate::ports::validator::Validator;
 
@@ -41,16 +43,20 @@ impl ReviewAiValidator {
         Ok(Self::new(api_key, model))
     }
 
-    /// Get the git diff from the run's worktree (Local backend).
-    /// Returns an empty string when no worktree is available.
+    /// Get the branch diff from the run's worktree (Local backend).
+    ///
+    /// Uses `git diff origin/main...HEAD` to capture all commits on the task
+    /// branch relative to where it diverged from main — not just uncommitted
+    /// working-tree changes.
     async fn get_diff(&self, run: &TaskRun) -> String {
         let worktree = match &run.worktree_path {
             Some(p) => p.clone(),
             None => return String::new(),
         };
 
+        // Three-dot notation: diff of commits on this branch since diverging from origin/main.
         let output = tokio::process::Command::new("git")
-            .args(["diff", "HEAD"])
+            .args(["diff", "origin/main...HEAD"])
             .current_dir(&worktree)
             .output()
             .await;
@@ -62,7 +68,7 @@ impl ReviewAiValidator {
                 tracing::warn!(
                     run_id = %run.run_id,
                     worktree,
-                    "git diff returned non-zero: {}",
+                    "git diff origin/main...HEAD returned non-zero: {}",
                     stderr.trim()
                 );
                 String::new()
@@ -74,20 +80,19 @@ impl ReviewAiValidator {
         }
     }
 
-    /// Call the Anthropic Messages API to review the diff against the run's context.
+    /// Call the Anthropic Messages API to review the diff against the spec's acceptance criteria.
     async fn call_review_llm(
         &self,
         run: &TaskRun,
+        spec: &TaskSpec,
         diff: &str,
     ) -> Result<ValidationOutcome, ThalaError> {
-        // Build a review prompt. Keep it concise to stay within token limits.
         let diff_section = if diff.is_empty() {
-            "No diff available (remote backend or no worktree changes).".to_string()
+            "No diff available (remote backend or no branch commits yet).".to_string()
         } else {
             format!("```diff\n{diff}\n```")
         };
 
-        // Note: review_feedback from a previous cycle is injected here if present.
         let feedback_section = run
             .review_feedback
             .as_deref()
@@ -96,16 +101,23 @@ impl ReviewAiValidator {
 
         let prompt = format!(
             "You are reviewing a code change produced by an AI coding agent.\n\n\
-             Review the following diff and respond with a JSON object containing:\n\
-             - \"passed\": true if the diff represents a meaningful, non-empty change \
-               that is syntactically valid and does not introduce obvious regressions, \
-               false otherwise\n\
+             Review the following diff against the task's acceptance criteria and respond \
+             with a JSON object containing:\n\
+             - \"passed\": true if the diff represents a meaningful change that satisfies \
+               the acceptance criteria, is syntactically valid, and does not introduce \
+               obvious regressions; false otherwise\n\
              - \"detail\": a concise explanation (1-3 sentences)\n\n\
-             Task ID: {task_id}{feedback}\n\n\
+             Task ID: {task_id}\n\
+             Title: {title}\n\n\
+             ## Acceptance Criteria\n\
+             {acceptance_criteria}\
+             {feedback}\n\n\
              ## Diff\n\
              {diff_section}\n\n\
              Respond with JSON only.",
             task_id = run.task_id.as_str(),
+            title = spec.title,
+            acceptance_criteria = spec.acceptance_criteria,
             feedback = feedback_section,
             diff_section = diff_section,
         );
@@ -142,12 +154,10 @@ impl ReviewAiValidator {
             ThalaError::Validation(format!("Failed to parse ReviewAI response: {e}"))
         })?;
 
-        // Extract the text content from the Anthropic response.
         let content = data["content"][0]["text"]
             .as_str()
             .unwrap_or("{\"passed\":false,\"detail\":\"Could not parse response\"}");
 
-        // Parse the JSON review decision.
         let decision: serde_json::Value = serde_json::from_str(content)
             .unwrap_or_else(|_| serde_json::json!({"passed": false, "detail": content}));
 
@@ -159,6 +169,7 @@ impl ReviewAiValidator {
 
         tracing::info!(
             run_id = %run.run_id,
+            task_id = %run.task_id,
             passed,
             detail = %detail,
             "ReviewAI decision"
@@ -187,7 +198,7 @@ impl Validator for ReviewAiValidator {
         ValidatorKind::ReviewAi
     }
 
-    async fn validate(&self, run: &TaskRun) -> Result<ValidationOutcome, ThalaError> {
+    async fn validate(&self, run: &TaskRun, spec: &TaskSpec) -> Result<ValidationOutcome, ThalaError> {
         let diff = self.get_diff(run).await;
 
         tracing::info!(
@@ -198,6 +209,6 @@ impl Validator for ReviewAiValidator {
             "ReviewAiValidator: calling LLM review"
         );
 
-        self.call_review_llm(run, &diff).await
+        self.call_review_llm(run, spec, &diff).await
     }
 }

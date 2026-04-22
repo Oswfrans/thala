@@ -8,15 +8,28 @@
 use thala::adapters::execution::cloudflare::{CloudflareBackend, CloudflareConfig};
 use thala::adapters::execution::local::LocalBackend;
 use thala::adapters::execution::modal::{ModalBackend, ModalConfig};
-use thala::adapters::execution::opencode_zen::{OpenCodeZenBackend, OpenCodeZenConfig};
 use thala::adapters::validation::noop::NoopValidator;
 use thala::adapters::validation::review_ai::ReviewAiValidator;
 use thala::core::ids::{RunId, TaskId};
 use thala::core::run::TaskRun;
 use thala::core::run::{ExecutionBackendKind, WorkerHandle};
+use thala::core::task::TaskSpec;
 use thala::core::validation::ValidatorKind;
 use thala::ports::execution::{ExecutionBackend, LaunchRequest};
 use thala::ports::validator::Validator;
+
+fn dummy_spec(id: &str) -> TaskSpec {
+    TaskSpec {
+        id: TaskId::new(id),
+        title: "Test task".into(),
+        acceptance_criteria: "All tests should pass".into(),
+        context: String::new(),
+        beads_ref: id.into(),
+        model_override: None,
+        always_human_review: false,
+        labels: vec![],
+    }
+}
 
 fn launch_request_for_backend() -> LaunchRequest {
     LaunchRequest {
@@ -158,79 +171,6 @@ async fn cloudflare_backend_cancel_requires_config_but_does_not_panic() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OpenCodeZenBackend tests
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn opencode_zen_backend_requires_callback_url_before_api_call() {
-    std::env::set_var("OPENCODE_API_KEY", "test-key");
-    let backend = OpenCodeZenBackend::new(OpenCodeZenConfig {
-        base_url: "https://opencode.invalid/zen/v1".into(),
-    });
-    let err = backend
-        .launch(launch_request_for_backend())
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("callback_url is required"));
-    std::env::remove_var("OPENCODE_API_KEY");
-}
-
-#[test]
-fn opencode_zen_backend_reports_correct_kind() {
-    let config = OpenCodeZenConfig {
-        base_url: "https://opencode.ai/zen/v1".into(),
-    };
-    let backend = OpenCodeZenBackend::new(config);
-    assert_eq!(backend.kind(), ExecutionBackendKind::OpenCodeZen);
-    assert!(!backend.is_local());
-    assert_eq!(backend.name(), "opencode-zen");
-}
-
-#[test]
-fn opencode_zen_config_from_env_uses_default_url() {
-    std::env::remove_var("OPENCODE_ZEN_BASE_URL");
-    let config = OpenCodeZenConfig::from_env();
-    assert_eq!(config.base_url, "https://opencode.ai/zen/v1");
-}
-
-#[test]
-fn opencode_zen_config_from_env_respects_override() {
-    std::env::set_var("OPENCODE_ZEN_BASE_URL", "https://custom.example.com/v1");
-    let config = OpenCodeZenConfig::from_env();
-    assert_eq!(config.base_url, "https://custom.example.com/v1");
-    std::env::remove_var("OPENCODE_ZEN_BASE_URL");
-}
-
-#[tokio::test]
-async fn opencode_zen_backend_observe_without_key_returns_gracefully() {
-    // Without a key the API call will fail; observe() should return is_alive=false
-    // rather than panicking.
-    std::env::remove_var("OPENCODE_API_KEY");
-    let backend = OpenCodeZenBackend::new(OpenCodeZenConfig {
-        base_url: "https://opencode.ai/zen/v1".into(),
-    });
-    let handle = WorkerHandle {
-        job_id: "oz-test123".into(),
-        backend: ExecutionBackendKind::OpenCodeZen,
-    };
-    // Should not panic — either returns Ok (failed lookup → deleted) or Err.
-    let _ = backend.observe(&handle, None).await;
-}
-
-#[tokio::test]
-async fn opencode_zen_backend_cancel_is_noop_without_credentials() {
-    std::env::remove_var("OPENCODE_API_KEY");
-    let backend = OpenCodeZenBackend::new(OpenCodeZenConfig::default());
-    let handle = WorkerHandle {
-        job_id: "oz-test456".into(),
-        backend: ExecutionBackendKind::OpenCodeZen,
-    };
-    // cancel() silently swallows the error — always returns Ok.
-    let result = backend.cancel(&handle).await;
-    assert!(result.is_ok());
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // CloudflareConfig::from_env tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -263,17 +203,17 @@ fn cloudflare_config_from_env_parses_resource_limits() {
 #[tokio::test]
 async fn noop_validator_always_passes() {
     let validator = NoopValidator;
-    assert_eq!(validator.kind(), ValidatorKind::ReviewAi);
+    assert_eq!(validator.kind(), ValidatorKind::Noop);
 
-    // Create a dummy run for validation
     let run = TaskRun::new(
         RunId::new_v4(),
         TaskId::new("bd-test"),
         1,
         ExecutionBackendKind::Local,
     );
+    let spec = dummy_spec("bd-test");
 
-    let outcome = validator.validate(&run).await.unwrap();
+    let outcome = validator.validate(&run, &spec).await.unwrap();
     assert!(outcome.passed);
 }
 
@@ -302,9 +242,10 @@ async fn review_ai_validator_invalid_key_returns_error() {
         1,
         ExecutionBackendKind::Local,
     );
+    let spec = dummy_spec("bd-test");
 
     // With a fake key the Anthropic API returns 401 → validate() returns Err.
-    let result = validator.validate(&run).await;
+    let result = validator.validate(&run, &spec).await;
     assert!(
         result.is_err(),
         "Expected error with invalid API key, got: {result:?}"

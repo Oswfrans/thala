@@ -109,6 +109,9 @@ tempfile = "3.26"
 # Regex (action ID parsing)
 regex = "1.10"
 
+# Glob pattern matching (protected_paths in merge policy)
+globset = "0.4"
+
 # Tera template engine (worker prompt rendering from WORKFLOW.md)
 tera = { version = "1", default-features = false }
 

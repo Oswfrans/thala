@@ -2002,6 +2002,7 @@ dependencies = [
  "clap",
  "directories",
  "ed25519-dalek",
+ "globset",
  "hex",
  "hmac",
  "libc",

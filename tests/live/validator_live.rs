@@ -6,31 +6,40 @@
 use thala::adapters::validation::review_ai::ReviewAiValidator;
 use thala::core::ids::{RunId, TaskId};
 use thala::core::run::{ExecutionBackendKind, TaskRun};
+use thala::core::task::TaskSpec;
 use thala::core::validation::ValidatorKind;
 use thala::ports::validator::Validator;
+
+fn dummy_spec(id: &str) -> TaskSpec {
+    TaskSpec {
+        id: TaskId::new(id),
+        title: "Live test task".into(),
+        acceptance_criteria: "The implementation should be correct and well-tested.".into(),
+        context: String::new(),
+        beads_ref: id.into(),
+        model_override: None,
+        always_human_review: false,
+        labels: vec![],
+    }
+}
 
 /// Test that ReviewAiValidator actually calls the LLM when ANTHROPIC_API_KEY is set.
 #[tokio::test]
 #[ignore = "requires ANTHROPIC_API_KEY"]
 async fn review_ai_validator_live_calls_llm() {
-    // Ensure API key is available
-    let validator = ReviewAiValidator::from_env("claude-sonnet-4").unwrap();
+    let validator = ReviewAiValidator::from_env("claude-sonnet-4-6").unwrap();
     assert_eq!(validator.kind(), ValidatorKind::ReviewAi);
 
-    // Create a run with PR information (in a real test, this would have actual PR data)
     let run = TaskRun::new(
         RunId::new_v4(),
         TaskId::new("bd-live-001"),
         1,
         ExecutionBackendKind::Local,
     );
+    let spec = dummy_spec("bd-live-001");
 
-    // This should actually call the Anthropic API
-    let outcome = validator.validate(&run).await.unwrap();
+    let outcome = validator.validate(&run, &spec).await.unwrap();
 
-    // The outcome should now be based on actual LLM review, not the stub
-    // We can't assert on pass/fail since it depends on the actual review,
-    // but we can verify the validator kind is preserved
     assert_eq!(outcome.validator, ValidatorKind::ReviewAi);
     assert!(!outcome.summary.is_empty());
 }
@@ -41,7 +50,7 @@ async fn review_ai_validator_live_calls_llm() {
 async fn review_ai_validator_with_explicit_key() {
     let api_key = std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not set");
 
-    let validator = ReviewAiValidator::new(api_key, "claude-sonnet-4");
+    let validator = ReviewAiValidator::new(api_key, "claude-sonnet-4-6");
 
     let run = TaskRun::new(
         RunId::new_v4(),
@@ -49,7 +58,8 @@ async fn review_ai_validator_with_explicit_key() {
         1,
         ExecutionBackendKind::Local,
     );
+    let spec = dummy_spec("bd-live-002");
 
-    let outcome = validator.validate(&run).await.unwrap();
+    let outcome = validator.validate(&run, &spec).await.unwrap();
     assert_eq!(outcome.validator, ValidatorKind::ReviewAi);
 }

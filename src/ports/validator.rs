@@ -7,6 +7,7 @@ use async_trait::async_trait;
 
 use crate::core::error::ThalaError;
 use crate::core::run::TaskRun;
+use crate::core::task::TaskSpec;
 use crate::core::validation::{ValidationOutcome, ValidatorKind};
 
 // ── Validator ─────────────────────────────────────────────────────────────────
@@ -26,6 +27,6 @@ pub trait Validator: Send + Sync {
     /// Run validation against a completed run.
     ///
     /// The run must be in a terminal status (Completed) before this is called.
-    /// The validator may inspect the run's PR, worktree, or diff.
-    async fn validate(&self, run: &TaskRun) -> Result<ValidationOutcome, ThalaError>;
+    /// The spec provides the task's acceptance criteria for review AI validators.
+    async fn validate(&self, run: &TaskRun, spec: &TaskSpec) -> Result<ValidationOutcome, ThalaError>;
 }

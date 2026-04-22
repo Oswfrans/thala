@@ -118,7 +118,7 @@ impl ValidatorCoordinator {
         };
 
         // Step 1: Review AI.
-        let review_outcome = self.review_ai.validate(&run).await?;
+        let review_outcome = self.review_ai.validate(&run, &record.spec).await?;
 
         let _ = self
             .events_tx
@@ -486,10 +486,29 @@ fn record_requires_human_approval(run: &TaskRun, workflow: &WorkflowConfig, diff
     false
 }
 
-/// Return true if the git diff output contains changes to any of the given path prefixes.
+/// Return true if the git diff output contains changes to any protected path.
 ///
 /// Matches against `+++ b/<path>` and `--- a/<path>` lines in the diff output.
+/// Patterns are treated as globs (e.g. "auth/**", "**/migrations/**") using the
+/// globset crate — plain prefixes like "auth/" also work.
 fn diff_touches_protected_path(diff: &str, patterns: &[String]) -> bool {
+    use globset::{Glob, GlobSetBuilder};
+
+    let mut builder = GlobSetBuilder::new();
+    for p in patterns {
+        match Glob::new(p) {
+            Ok(g) => { builder.add(g); }
+            Err(e) => tracing::warn!(pattern = %p, "Invalid protected_path glob: {e}"),
+        }
+    }
+    let set = match builder.build() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to compile protected_paths glob set: {e}");
+            return false;
+        }
+    };
+
     for line in diff.lines() {
         let file_path = if let Some(rest) = line.strip_prefix("+++ b/") {
             rest
@@ -499,13 +518,51 @@ fn diff_touches_protected_path(diff: &str, patterns: &[String]) -> bool {
             continue;
         };
 
-        for pattern in patterns {
-            // Treat the protected path as a prefix so "src/security" matches
-            // both "src/security/mod.rs" and "src/security/policy.rs".
-            if file_path.starts_with(pattern.as_str()) || file_path == pattern.as_str() {
-                return true;
-            }
+        if set.is_match(file_path) {
+            return true;
         }
     }
     false
+}
+
+#[cfg(test)]
+mod protected_path_tests {
+    use super::diff_touches_protected_path;
+
+    fn diff_with_files(files: &[&str]) -> String {
+        files
+            .iter()
+            .map(|f| format!("+++ b/{f}\n--- a/{f}\n@@ -1 +1 @@\n+change\n"))
+            .collect()
+    }
+
+    #[test]
+    fn glob_star_star_matches_nested_files() {
+        let diff = diff_with_files(&["auth/session.rs", "auth/tokens/jwt.rs"]);
+        assert!(diff_touches_protected_path(&diff, &["auth/**".into()]));
+    }
+
+    #[test]
+    fn double_star_prefix_matches_anywhere() {
+        let diff = diff_with_files(&["src/db/migrations/001_init.sql"]);
+        assert!(diff_touches_protected_path(&diff, &["**/migrations/**".into()]));
+    }
+
+    #[test]
+    fn non_matching_pattern_returns_false() {
+        let diff = diff_with_files(&["src/core/task.rs"]);
+        assert!(!diff_touches_protected_path(&diff, &["auth/**".into()]));
+    }
+
+    #[test]
+    fn plain_prefix_without_glob_still_works() {
+        let diff = diff_with_files(&["billing/invoices.rs"]);
+        assert!(diff_touches_protected_path(&diff, &["billing/**".into()]));
+    }
+
+    #[test]
+    fn empty_patterns_never_blocks() {
+        let diff = diff_with_files(&["anything/file.rs"]);
+        assert!(!diff_touches_protected_path(&diff, &[]));
+    }
 }

@@ -21,6 +21,9 @@ pub enum ValidatorKind {
 
     /// Explicit human approval via an interaction channel.
     HumanApproval,
+
+    /// No-op validator — always passes. Used when no real validator is configured.
+    Noop,
 }
 
 impl ValidatorKind {
@@ -29,6 +32,7 @@ impl ValidatorKind {
             Self::ReviewAi => "review_ai",
             Self::CiChecks => "ci_checks",
             Self::HumanApproval => "human_approval",
+            Self::Noop => "noop",
         }
     }
 }

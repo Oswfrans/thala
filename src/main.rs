@@ -16,6 +16,7 @@ use thala::adapters::interaction::discord::{DiscordInteraction, DiscordInteracti
 use thala::adapters::interaction::slack::{SlackInteraction, SlackInteractionConfig};
 use thala::adapters::repo::GitRepoProvider;
 use thala::adapters::state::SqliteStateStore;
+use thala::adapters::validation::review_ai::ReviewAiValidator;
 use thala::adapters::validation::NoopValidator;
 use thala::core::run::ExecutionBackendKind;
 use thala::core::workflow::WorkflowConfig;
@@ -176,8 +177,20 @@ async fn main() -> Result<()> {
         &workflow.execution.github_token_env,
     ));
 
-    // Validator — defaults to noop; swap in ReviewAiValidator when ready
-    let review_ai = Arc::new(NoopValidator);
+    // Validator — use ReviewAiValidator when ANTHROPIC_API_KEY is set, otherwise noop.
+    let review_ai: Arc<dyn thala::ports::validator::Validator> =
+        match ReviewAiValidator::from_env(&workflow.models.manager) {
+            Ok(v) => {
+                info!(model = %workflow.models.manager, "ReviewAiValidator enabled");
+                Arc::new(v)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "ANTHROPIC_API_KEY not set — review AI disabled, using NoopValidator"
+                );
+                Arc::new(NoopValidator)
+            }
+        };
 
     // ── Engine config ─────────────────────────────────────────────────────────
 
