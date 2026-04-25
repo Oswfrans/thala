@@ -203,10 +203,13 @@ impl Monitor {
                     let reason = "worker process exited without writing signal file";
                     let updated = apply_run_transition(
                         &run,
-                        RunTransition::FailureSignaled { reason: reason.into() },
+                        RunTransition::FailureSignaled {
+                            reason: reason.into(),
+                        },
                     )?;
                     self.store.upsert_run(&updated).await?;
-                    self.handle_run_failed(&run.task_id, &run.run_id, reason).await?;
+                    self.handle_run_failed(&run.task_id, &run.run_id, reason)
+                        .await?;
                 }
             }
 
@@ -265,10 +268,13 @@ impl Monitor {
                 let reason = "worker reported failure during polling";
                 let updated = apply_run_transition(
                     run,
-                    RunTransition::FailureSignaled { reason: reason.into() },
+                    RunTransition::FailureSignaled {
+                        reason: reason.into(),
+                    },
                 )?;
                 self.store.upsert_run(&updated).await?;
-                self.handle_run_failed(&run.task_id, &run.run_id, reason).await?;
+                self.handle_run_failed(&run.task_id, &run.run_id, reason)
+                    .await?;
             }
             RunStatus::Cancelled => {
                 let updated = apply_run_transition(run, RunTransition::Cancelled)?;
@@ -323,10 +329,13 @@ impl Monitor {
             tracing::warn!(run_id = %run.run_id, task_id = %run.task_id, "{reason}");
             let updated = apply_run_transition(
                 run,
-                RunTransition::FailureSignaled { reason: reason.clone() },
+                RunTransition::FailureSignaled {
+                    reason: reason.clone(),
+                },
             )?;
             self.store.upsert_run(&updated).await?;
-            self.handle_run_failed(&run.task_id, &run.run_id, &reason).await?;
+            self.handle_run_failed(&run.task_id, &run.run_id, &reason)
+                .await?;
             return Ok(());
         }
 
@@ -340,10 +349,13 @@ impl Monitor {
             let reason = reason.trim();
             let updated = apply_run_transition(
                 run,
-                RunTransition::FailureSignaled { reason: reason.to_string() },
+                RunTransition::FailureSignaled {
+                    reason: reason.to_string(),
+                },
             )?;
             self.store.upsert_run(&updated).await?;
-            self.handle_run_failed(&run.task_id, &run.run_id, reason).await?;
+            self.handle_run_failed(&run.task_id, &run.run_id, reason)
+                .await?;
             return Ok(());
         }
 
@@ -418,14 +430,20 @@ impl Monitor {
         if let Some(mut record) = self.store.get_task(task_id).await? {
             record = apply_transition(
                 &record,
-                Transition::RunFailed { reason: reason.to_string() },
+                Transition::RunFailed {
+                    reason: reason.to_string(),
+                },
             )?;
             self.store.upsert_task(&record).await?;
         }
 
         let _ = self
             .events_tx
-            .send(OrchestratorEvent::run_failed(task_id.clone(), run_id.clone(), reason))
+            .send(OrchestratorEvent::run_failed(
+                task_id.clone(),
+                run_id.clone(),
+                reason,
+            ))
             .await;
 
         Ok(())

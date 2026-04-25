@@ -211,9 +211,9 @@ impl ExecutionBackend for LocalBackend {
             });
         }
 
-        // Capture the last 50 lines of the pane.
+        // Capture recent pane output for a stable, bounded activity cursor.
         let output = tokio::process::Command::new("tmux")
-            .args(["capture-pane", "-p", "-t", &handle.job_id])
+            .args(["capture-pane", "-t", &handle.job_id, "-p", "-S", "-100"])
             .output()
             .await
             .map_err(|e| ThalaError::backend("local", format!("tmux capture-pane failed: {e}")))?;

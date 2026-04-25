@@ -17,7 +17,7 @@
 //! | `issue.acceptance_criteria`        | acceptance criteria (required)       |
 //! | `issue.context`                    | additional context from task author  |
 //! | `issue.labels`                     | list of label strings                |
-//! | `run.attempt`                      | current dispatch attempt number      |
+//! | `run.attempt`                      | one-based dispatch attempt number    |
 //! | `run.model`                        | model that will be used for this run |
 
 use crate::core::error::ThalaError;
@@ -48,6 +48,7 @@ impl PromptBuilder {
         record: &TaskRecord,
         workflow: &WorkflowConfig,
         model: &str,
+        attempt: u32,
     ) -> Result<String, ThalaError> {
         let mut tera = tera::Tera::default();
         // Strict undefined: unknown variables are errors, not empty strings.
@@ -71,7 +72,7 @@ impl PromptBuilder {
         ctx.insert(
             "run",
             &serde_json::json!({
-                "attempt": record.attempt,
+                "attempt": attempt,
                 "model": model,
             }),
         );
@@ -166,10 +167,21 @@ mod tests {
         let builder = PromptBuilder::new(
             "You work on {{ product_name }}. Task: {{ issue.identifier }} — {{ issue.title }}",
         );
-        let rendered = builder.render(&record, &workflow, "kimi-k2.5").unwrap();
+        let rendered = builder.render(&record, &workflow, "kimi-k2.5", 1).unwrap();
         assert!(rendered.contains("example-app"));
         assert!(rendered.contains("bd-0001"));
         assert!(rendered.contains("Fix the bug"));
+    }
+
+    #[test]
+    fn renders_supplied_attempt_number() {
+        let record = make_record("bd-0002", "X", "Y");
+        let workflow = make_workflow("test");
+        let builder = PromptBuilder::new("Attempt {{ run.attempt }}");
+
+        let rendered = builder.render(&record, &workflow, "kimi", 2).unwrap();
+
+        assert_eq!(rendered, "Attempt 2");
     }
 
     #[test]
@@ -177,7 +189,7 @@ mod tests {
         let record = make_record("bd-0002", "X", "Y");
         let workflow = make_workflow("test");
         let builder = PromptBuilder::new("{{ nonexistent_var }}");
-        let result = builder.render(&record, &workflow, "kimi");
+        let result = builder.render(&record, &workflow, "kimi", 1);
         assert!(result.is_err());
     }
 

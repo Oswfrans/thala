@@ -28,5 +28,9 @@ pub trait Validator: Send + Sync {
     ///
     /// The run must be in a terminal status (Completed) before this is called.
     /// The spec provides the task's acceptance criteria for review AI validators.
-    async fn validate(&self, run: &TaskRun, spec: &TaskSpec) -> Result<ValidationOutcome, ThalaError>;
+    async fn validate(
+        &self,
+        run: &TaskRun,
+        spec: &TaskSpec,
+    ) -> Result<ValidationOutcome, ThalaError>;
 }

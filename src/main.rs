@@ -12,6 +12,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 use thala::adapters::beads::{BeadsTaskSink, BeadsTaskSource};
 use thala::adapters::execution::router::DefaultBackendRouter;
 use thala::adapters::execution::{CloudflareBackend, LocalBackend, ModalBackend, ModalConfig};
+use thala::adapters::intake::discord::{DiscordIntake, DiscordIntakeConfig};
+use thala::adapters::intake::discord_webhook::{DiscordWebhookConfig, DiscordWebhookServer};
 use thala::adapters::interaction::discord::{DiscordInteraction, DiscordInteractionConfig};
 use thala::adapters::interaction::slack::{SlackInteraction, SlackInteractionConfig};
 use thala::adapters::repo::GitRepoProvider;
@@ -20,6 +22,7 @@ use thala::adapters::validation::review_ai::ReviewAiValidator;
 use thala::adapters::validation::NoopValidator;
 use thala::core::run::ExecutionBackendKind;
 use thala::core::workflow::WorkflowConfig;
+use thala::onboard_wizard::run_enhanced_onboard;
 use thala::orchestrator::dispatcher::DispatcherConfig;
 use thala::orchestrator::engine::{EngineConfig, OrchestratorEngine};
 use thala::orchestrator::human_loop::HumanLoopConfig;
@@ -74,7 +77,7 @@ async fn main() -> Result<()> {
 
     // Onboard doesn't need WORKFLOW.md — handle it before the file load.
     if matches!(cli.command, Some(Command::Onboard)) {
-        return run_onboard();
+        return run_enhanced_onboard();
     }
 
     // Load WORKFLOW.md
@@ -155,14 +158,45 @@ async fn main() -> Result<()> {
             .context("Failed to open Slack interactions database")?,
         ));
     }
+    // Discord interaction and intake (for approvals and task creation)
+    let mut discord_intake: Option<Arc<DiscordIntake>> = None;
+    let mut discord_interaction: Option<Arc<DiscordInteraction>> = None;
+
     if let Some(discord_cfg) = &workflow.discord {
-        interaction_layers.push(Arc::new(DiscordInteraction::new(
-            DiscordInteractionConfig {
-                bot_token: discord_cfg.bot_token.clone(),
-                public_key: discord_cfg.public_key.clone(),
-                alerts_channel_id: discord_cfg.alerts_channel_id.clone(),
-            },
-        )));
+        let interaction = Arc::new(DiscordInteraction::new(DiscordInteractionConfig {
+            bot_token: discord_cfg.bot_token.clone(),
+            public_key: discord_cfg.public_key.clone(),
+            alerts_channel_id: discord_cfg.alerts_channel_id.clone(),
+        }));
+        discord_interaction = Some(Arc::clone(&interaction));
+        interaction_layers.push(interaction);
+
+        // Set up Discord intake if environment is configured
+        if std::env::var("DISCORD_INTAKE_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true)
+        {
+            let manager_api_key = std::env::var("OPENROUTER_API_KEY")
+                .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+                .unwrap_or_default();
+            let manager_api_base = std::env::var("MANAGER_API_BASE")
+                .unwrap_or_else(|_| "https://openrouter.ai/api/v1".into());
+
+            let sink_trait: Arc<dyn thala::ports::task_sink::TaskSink> = sink.clone();
+            discord_intake = Some(Arc::new(DiscordIntake::new(
+                DiscordIntakeConfig {
+                    bot_token: discord_cfg.bot_token.clone(),
+                    public_key: discord_cfg.public_key.clone(),
+                    manager_api_key,
+                    manager_api_base,
+                    planning_model: workflow.models.manager.clone(),
+                    product: workflow.product.clone(),
+                },
+                sink_trait,
+            )));
+
+            info!("Discord intake enabled");
+        }
     }
 
     // State store — SQLite in the same data dir established above.
@@ -222,6 +256,43 @@ async fn main() -> Result<()> {
         },
     };
 
+    // ── Start Discord webhook server (if configured) ──────────────────────────
+
+    let mut discord_webhook_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if let (Some(discord_cfg), Some(intake), Some(interaction)) =
+        (&workflow.discord, &discord_intake, &discord_interaction)
+    {
+        let bind_addr = std::env::var("THALA_DISCORD_BIND")
+            .ok()
+            .map(|raw| {
+                raw.parse()
+                    .map_err(|e| anyhow::anyhow!("invalid THALA_DISCORD_BIND '{raw}': {e}"))
+            })
+            .transpose()?;
+
+        let webhook_config = DiscordWebhookConfig::from_workflow(discord_cfg, bind_addr);
+        let prefix_len = webhook_config.public_key.len().min(16);
+        tracing::info!(
+            public_key_prefix = &webhook_config.public_key[..prefix_len],
+            public_key_len = webhook_config.public_key.len(),
+            "Discord webhook config loaded"
+        );
+
+        let webhook_server = DiscordWebhookServer::new(
+            webhook_config,
+            Some(Arc::clone(intake)),
+            Some(Arc::clone(interaction)),
+        );
+
+        discord_webhook_handle = Some(tokio::spawn(async move {
+            if let Err(e) = webhook_server.run().await {
+                tracing::error!("Discord webhook server error: {}", e);
+            }
+        }));
+
+        info!("Discord webhook server started");
+    }
+
     // ── Start engine ──────────────────────────────────────────────────────────
 
     info!("Starting Thala orchestration engine");
@@ -239,261 +310,10 @@ async fn main() -> Result<()> {
     .await
     .context("Orchestration engine failed")?;
 
-    Ok(())
-}
-
-// ── Onboarding wizard ─────────────────────────────────────────────────────────
-
-fn run_onboard() -> Result<()> {
-    use std::io::{self, Write};
-
-    fn prompt(label: &str, default: &str) -> String {
-        let hint = if default.is_empty() {
-            String::new()
-        } else {
-            format!(" [{default}]")
-        };
-        print!("{label}{hint}: ");
-        io::stdout().flush().ok();
-        let mut buf = String::new();
-        io::stdin().read_line(&mut buf).ok();
-        let trimmed = buf.trim().to_string();
-        if trimmed.is_empty() {
-            default.to_string()
-        } else {
-            trimmed
-        }
+    // Clean up webhook server
+    if let Some(handle) = discord_webhook_handle {
+        handle.abort();
     }
-
-    fn choose(label: &str, options: &[&str]) -> usize {
-        println!("{label}");
-        for (i, opt) in options.iter().enumerate() {
-            println!("  {}. {opt}", i + 1);
-        }
-        loop {
-            print!("Choice [1]: ");
-            io::stdout().flush().ok();
-            let mut buf = String::new();
-            io::stdin().read_line(&mut buf).ok();
-            let s = buf.trim();
-            if s.is_empty() {
-                return 0;
-            }
-            if let Ok(n) = s.parse::<usize>() {
-                if n >= 1 && n <= options.len() {
-                    return n - 1;
-                }
-            }
-            println!("Please enter a number between 1 and {}.", options.len());
-        }
-    }
-
-    println!();
-    println!("╔══════════════════════════════════════════╗");
-    println!("║         Thala Onboarding Wizard          ║");
-    println!("╚══════════════════════════════════════════╝");
-    println!();
-    println!("This wizard generates a WORKFLOW.md for your product repo.");
-    println!("Press Enter to accept defaults shown in [brackets].");
-    println!();
-
-    // Product info
-    let product = prompt("Product slug (e.g. my-app)", "my-app");
-    let workspace_root = prompt(
-        "Absolute path to the product workspace",
-        "/workspaces/my-app",
-    );
-    let github_repo = prompt("GitHub repo slug (e.g. org/repo)", "");
-
-    println!("Task tracker: Beads.");
-
-    // Execution backend
-    let backend_idx = choose(
-        "Which execution backend?",
-        &[
-            "local      — tmux sessions on this host (no extra credentials)",
-            "cloudflare — Cloudflare Sandbox control plane (THALA_CF_BASE_URL, THALA_CF_TOKEN)",
-            "modal      — Modal serverless containers (modal CLI)",
-        ],
-    );
-    let backend_names = ["local", "cloudflare", "modal"];
-    let backend = backend_names[backend_idx];
-
-    if prompt_yes_no("Install missing CLIs and initialize Beads now?", true) {
-        if let Err(e) = prepare_onboarding_environment(backend, Path::new(&workspace_root)) {
-            eprintln!("✗ Setup preflight failed: {e}");
-            eprintln!("  You can re-run onboarding after fixing this, or run bash dev/setup.sh.");
-        }
-    }
-
-    let (backend_block, env_note) = match backend {
-        "cloudflare" => (
-            format!(
-                "\nexecution:\n  backend: cloudflare\n  workspace_root: \"{workspace_root}\"\n  github_token_env: THALA_GITHUB_TOKEN"
-            ),
-            "\nRequired env vars:\n  THALA_CF_BASE_URL=https://<control-plane>.workers.dev\n  THALA_CF_TOKEN=<shared Worker bearer token>\n  THALA_GITHUB_TOKEN=ghp_...",
-        ),
-        "modal" => {
-            let cb = prompt(
-                "Callback base URL (public URL of this Thala instance)",
-                "https://thala.example.com",
-            );
-            let app_file = prompt(
-                "Modal worker file (relative to workspace root)",
-                "dev/infra/modal_worker.py::run_worker",
-            );
-            (
-                format!(
-                    "\nexecution:\n  backend: modal\n  workspace_root: \"{workspace_root}\"\n  callback_base_url: \"{cb}\"\n  github_token_env: THALA_GITHUB_TOKEN\n\n# MODAL_APP_FILE={app_file}  # set this as an env var before starting Thala"
-                ),
-                "\nRequired env vars:\n  THALA_GITHUB_TOKEN=ghp_...\n  THALA_CALLBACK_BIND=127.0.0.1:8788\n  MODAL_APP_FILE=dev/infra/modal_worker.py::run_worker",
-            )
-        }
-        _ => (
-            format!("\nexecution:\n  backend: local\n  workspace_root: \"{workspace_root}\""),
-            "",
-        ),
-    };
-
-    // Models
-    let worker_model = prompt("Worker model", "opencode/kimi-k2.5");
-    let manager_model = prompt("Manager model (review AI)", "anthropic/claude-opus-4-6");
-
-    // Notifications
-    let discord_token = prompt("Discord bot token (leave blank to skip)", "");
-    let discord_channel = if !discord_token.is_empty() {
-        prompt("Discord alerts channel ID", "")
-    } else {
-        String::new()
-    };
-    let discord_block = if !discord_token.is_empty() && !discord_channel.is_empty() {
-        format!(
-            "\ndiscord:\n  bot_token: \"{discord_token}\"  # move to env var for production\n  public_key: \"\"  # fill in from Discord developer portal\n  alerts_channel_id: \"{discord_channel}\""
-        )
-    } else {
-        String::new()
-    };
-
-    // Generate WORKFLOW.md
-    let tracker_block = format!(
-        "tracker:\n  backend: beads\n  active_states: [\"open\"]\n  terminal_states: [\"Done\", \"Cancelled\"]\n  beads_workspace_root: {workspace_root}\n  beads_ready_status: open"
-    );
-
-    let workflow_md = format!(
-        r#"---
-product: "{product}"
-github_repo: "{github_repo}"
-
-{tracker_block}
-{backend_block}
-
-models:
-  worker: "{worker_model}"
-  manager: "{manager_model}"
-  max_review_cycles: 2
-
-hooks:
-  before_run: "git pull --rebase --autostash origin main"
-  after_run: ""
-  before_cleanup: ""
-
-limits:
-  max_concurrent_runs: 3
-  stall_timeout_ms: 1800000
-
-retry:
-  max_attempts: 3
-  allow_backend_reroute: false
-
-merge:
-  auto_merge: false
-  protected_paths:
-    - "auth/**"
-    - "billing/**"
-    - "infra/**"
-    - "**/migrations/**"
-    - ".github/workflows/**"
-
-stuck:
-  auto_resolve_after_ms: 0
-{discord_block}
----
-
-You are an expert developer working on **{product}**.
-
-## Task
-
-**ID:** {{{{ issue.identifier }}}}
-**Title:** {{{{ issue.title }}}}
-**Attempt:** {{{{ run.attempt }}}}
-
-## Acceptance Criteria
-
-{{{{ issue.acceptance_criteria }}}}
-
-{{%- if issue.context %}}
-## Context
-
-{{{{ issue.context }}}}
-{{%- endif %}}
-
-When complete, write `DONE` to `.thala/signals/{{{{ issue.identifier }}}}.signal`.
-"#,
-    );
-
-    let out_path = format!("{workspace_root}/WORKFLOW.md");
-    println!();
-    println!("─── Generated WORKFLOW.md preview ───────────────────────────────────────");
-    println!("{workflow_md}");
-    println!("─────────────────────────────────────────────────────────────────────────");
-
-    print!("Write to {out_path}? [y/N]: ");
-    io::stdout().flush().ok();
-    let mut confirm = String::new();
-    io::stdin().read_line(&mut confirm).ok();
-    if confirm.trim().to_lowercase() == "y" {
-        if let Some(parent) = std::path::Path::new(&out_path).parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("✗ Could not create directory {}: {e}", parent.display());
-                eprintln!("  Create the workspace directory first, then copy the WORKFLOW.md preview above.");
-                eprintln!(
-                    "  Or run: mkdir -p {} && cp /dev/stdin {out_path}",
-                    parent.display()
-                );
-            } else if let Err(e) = std::fs::write(&out_path, &workflow_md) {
-                eprintln!("✗ Failed to write {out_path}: {e}");
-                eprintln!("  Copy the preview above manually.");
-            } else {
-                println!("✓ Written to {out_path}");
-            }
-        }
-    } else {
-        println!("Skipped write. Copy the preview above manually.");
-    }
-
-    if !env_note.is_empty() {
-        println!();
-        println!("─── Environment variables needed ─────────────────────────────────────────");
-        println!("{env_note}");
-        println!("─────────────────────────────────────────────────────────────────────────");
-        println!("Set these in your systemd unit or shell environment before starting Thala.");
-    }
-
-    // Modal-specific: check for uv, install modal, run modal setup.
-    if backend == "modal" {
-        println!();
-        println!("─── Modal setup ──────────────────────────────────────────────────────────");
-        setup_modal();
-        println!("─────────────────────────────────────────────────────────────────────────");
-    }
-
-    println!();
-    println!("Next steps:");
-    println!("  1. Review / edit {out_path}");
-    println!("  2. cargo build --release");
-    println!("  3. ./target/release/thala --workflow {out_path} validate");
-    println!("  4. ./target/release/thala --workflow {out_path} run");
-    println!();
 
     Ok(())
 }
@@ -507,24 +327,6 @@ fn preflight_workflow(workflow: &WorkflowConfig, beads_root: &Path) -> Result<()
         ensure_tool_installed("tmux", workflow.execution.backend.clone(), false)?;
     }
     ensure_beads_workspace(beads_root, true)
-}
-
-fn prepare_onboarding_environment(backend: &str, workspace_root: &Path) -> Result<()> {
-    ensure_tool_installed("bd", ExecutionBackendKind::Local, true)?;
-    if backend == "local" {
-        ensure_tool_installed("opencode", ExecutionBackendKind::Local, true)?;
-    }
-
-    if workspace_root.exists() {
-        ensure_beads_workspace(workspace_root, true)?;
-    } else {
-        println!(
-            "! Workspace {} does not exist yet; skipping `bd init` until it exists.",
-            workspace_root.display()
-        );
-    }
-
-    Ok(())
 }
 
 fn ensure_tool_installed(
@@ -750,132 +552,5 @@ fn prompt_yes_no(question: &str, default_yes: bool) -> bool {
         "y" | "yes" => true,
         "n" | "no" => false,
         _ => default_yes,
-    }
-}
-
-// ── Modal setup helper ────────────────────────────────────────────────────────
-
-/// Check for uv, install Modal if needed, then authenticate interactively.
-///
-/// Called from the onboarding wizard when the user selects the Modal backend.
-/// We prefer uv because it is significantly faster than pip.
-fn setup_modal() {
-    use std::process::Command;
-
-    let has_uv = Command::new("uv")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    let modal_installed = Command::new("modal")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if modal_installed {
-        println!("✓ modal CLI already installed — skipping install");
-    } else if has_uv {
-        println!("Installing modal via uv ...");
-        let ok = Command::new("uv")
-            .args(["tool", "install", "modal"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            println!("✓ modal installed via uv");
-            println!("  Note: if the auth step below fails with 'command not found',");
-            println!("  open a new terminal (to refresh PATH) and run: modal token new");
-        } else {
-            eprintln!("✗ uv tool install modal failed — run it manually, then re-run onboarding");
-            return;
-        }
-    } else {
-        // Check for Python 3 before attempting pip
-        let has_python = Command::new("python3")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !has_python {
-            eprintln!("✗ Neither uv nor python3 found — cannot install Modal CLI automatically.");
-            eprintln!("  Install uv: curl -LsSf https://astral.sh/uv/install.sh | sh");
-            eprintln!("  Then run: uv tool install modal");
-            eprintln!("  Then re-run: ./target/release/thala onboard");
-            return;
-        }
-        println!("uv not found — falling back to pip to install modal ...");
-        println!("(Consider installing uv for faster tooling: https://astral.sh/uv)");
-        // Try `python3 -m pip` first (reliable on Debian/Ubuntu where bare `pip`
-        // is often missing), then fall back to bare `pip`.
-        let ok = Command::new("python3")
-            .args(["-m", "pip", "install", "modal"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or_else(|_| {
-                Command::new("pip")
-                    .args(["install", "modal"])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            });
-        if ok {
-            println!("✓ modal installed via pip");
-        } else {
-            eprintln!("✗ pip install modal failed — install uv and run: uv tool install modal");
-            return;
-        }
-    }
-
-    println!();
-    println!("You need a Modal account to continue.");
-    println!("If you don't have one, sign up for free at https://modal.com before proceeding.");
-    println!();
-    // `modal token new` is the current auth command (Modal CLI >= 0.60).
-    // Fall back to `modal setup` for older installs.
-    println!("Running `modal token new` — a browser window will open for authentication.");
-    println!();
-    let auth_status = Command::new("modal").args(["token", "new"]).status();
-    let auth_ok = match auth_status {
-        Ok(s) if s.success() => {
-            println!("✓ Modal authentication complete");
-            true
-        }
-        Ok(_) => {
-            // Older CLI versions use `modal setup`
-            println!("  `modal token new` unavailable — trying `modal setup` (older CLI) ...");
-            match Command::new("modal").arg("setup").status() {
-                Ok(s) if s.success() => {
-                    println!("✓ modal setup complete");
-                    true
-                }
-                Ok(s) => {
-                    eprintln!("✗ modal setup exited {s} — re-run `modal token new` manually");
-                    false
-                }
-                Err(e) => {
-                    eprintln!("✗ Failed to run modal: {e}");
-                    eprintln!("  The modal binary may not be on PATH yet.");
-                    eprintln!("  Open a new terminal and run: modal token new");
-                    false
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("✗ Failed to run modal: {e}");
-            eprintln!("  The modal binary may not be on PATH yet (common after a fresh install).");
-            eprintln!("  Open a new terminal and run: modal token new");
-            false
-        }
-    };
-
-    if auth_ok {
-        println!();
-        println!("Verifying Modal connectivity ...");
-        match Command::new("modal").args(["app", "list"]).status() {
-            Ok(s) if s.success() => println!("✓ Modal connected — remote compute is available"),
-            _ => println!("  Run `modal app list` to verify the connection manually"),
-        }
     }
 }

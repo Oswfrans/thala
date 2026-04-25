@@ -85,6 +85,11 @@ pub enum Transition {
     /// Human kicked a Stuck or Failed task back into the dispatch queue.
     /// This creates a new run; does not mutate the existing run.
     RecoveryRequested,
+
+    /// Startup reconciliation found an active task with no persisted run.
+    /// The reconciler clears the missing handle and puts the task back in
+    /// the ready queue for a fresh dispatch.
+    RequeueAfterMissingRun { reason: String },
 }
 
 /// Attempt a task status transition. Returns a new `TaskRecord` on success.
@@ -110,12 +115,14 @@ pub fn apply_transition(
         // ── Dispatching ───────────────────────────────────────────────────────
         (TaskStatus::Dispatching, Transition::RunLaunched { .. }) => TaskStatus::Running,
         (TaskStatus::Dispatching, Transition::DispatchFailed { .. }) => TaskStatus::Stuck,
+        (TaskStatus::Dispatching, Transition::RequeueAfterMissingRun { .. }) => TaskStatus::Ready,
 
         // ── Running ───────────────────────────────────────────────────────────
         (TaskStatus::Running, Transition::RunCompleted) => TaskStatus::Validating,
         (TaskStatus::Running, Transition::RunFailed { .. }) => TaskStatus::Failed,
         (TaskStatus::Running, Transition::RunStalled { .. }) => TaskStatus::Stuck,
         (TaskStatus::Running, Transition::RequireHumanInput) => TaskStatus::WaitingForHuman,
+        (TaskStatus::Running, Transition::RequeueAfterMissingRun { .. }) => TaskStatus::Ready,
 
         // ── WaitingForHuman ───────────────────────────────────────────────────
         (TaskStatus::WaitingForHuman, Transition::HumanApproved) => TaskStatus::Validating,
@@ -166,7 +173,8 @@ pub fn apply_transition(
         }
         Transition::ValidationPassed
         | Transition::HumanResolved
-        | Transition::ValidationFailedTerminal { .. } => {
+        | Transition::ValidationFailedTerminal { .. }
+        | Transition::RequeueAfterMissingRun { .. } => {
             updated.active_run_id = None;
         }
         _ => {}
@@ -334,6 +342,32 @@ mod tests {
         let rec = apply_transition(&rec, Transition::ValidationPassed).unwrap();
         assert_eq!(rec.status, TaskStatus::Succeeded);
         assert!(rec.status.is_terminal());
+    }
+
+    #[test]
+    fn missing_run_requeue_clears_active_run() {
+        let run_id = RunId::new_v4();
+        let rec = pending_record("bd-0008");
+        let rec = apply_transition(&rec, Transition::MarkReady).unwrap();
+        let rec = apply_transition(&rec, Transition::BeginDispatching).unwrap();
+        let rec = apply_transition(
+            &rec,
+            Transition::RunLaunched {
+                run_id: run_id.clone(),
+            },
+        )
+        .unwrap();
+
+        let updated = apply_transition(
+            &rec,
+            Transition::RequeueAfterMissingRun {
+                reason: "run record missing after restart".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated.status, TaskStatus::Ready);
+        assert_eq!(updated.active_run_id, None);
     }
 
     #[test]

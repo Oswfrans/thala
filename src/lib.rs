@@ -26,5 +26,6 @@
 
 pub mod adapters;
 pub mod core;
+pub mod onboard_wizard;
 pub mod orchestrator;
 pub mod ports;

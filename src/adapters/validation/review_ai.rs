@@ -198,7 +198,11 @@ impl Validator for ReviewAiValidator {
         ValidatorKind::ReviewAi
     }
 
-    async fn validate(&self, run: &TaskRun, spec: &TaskSpec) -> Result<ValidationOutcome, ThalaError> {
+    async fn validate(
+        &self,
+        run: &TaskRun,
+        spec: &TaskSpec,
+    ) -> Result<ValidationOutcome, ThalaError> {
         let diff = self.get_diff(run).await;
 
         tracing::info!(

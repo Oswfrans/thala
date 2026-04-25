@@ -96,6 +96,8 @@ impl Dispatcher {
         // Always upsert here: persists both the status change and the cleared hint.
         self.store.upsert_task(&record).await?;
 
+        let next_attempt = record.attempt + 1;
+
         // Determine backend — honour a reroute hint from a human action if set.
         let backend_kind = if let Some(hint) = reroute_hint {
             tracing::info!(
@@ -106,16 +108,44 @@ impl Dispatcher {
             hint
         } else {
             self.router
-                .route(&record.spec, &self.workflow, record.attempt)
+                .route(&record.spec, &self.workflow, next_attempt)
         };
         let backend = self.router.backend(&backend_kind);
+
+        // Determine model before building the prompt (template may reference it).
+        let model = record
+            .spec
+            .model_override
+            .clone()
+            .unwrap_or_else(|| self.workflow.models.worker.clone());
+
+        // Build the prompt before any remote side effects. A bad WORKFLOW.md
+        // template should fail this dispatch without pushing task branches or
+        // launching workers.
+        let prompt = if let Some(template) = &self.config.prompt_template {
+            let builder = PromptBuilder::new(template);
+            match builder.render(&record, &self.workflow, &model, next_attempt) {
+                Ok(rendered) => rendered,
+                Err(e) => {
+                    tracing::error!(
+                        task_id = %task_id,
+                        "Tera template render failed — skipping dispatch: {e}"
+                    );
+                    self.mark_dispatch_failed(&task_id, format!("template render failed: {e}"))
+                        .await?;
+                    return Err(e.into());
+                }
+            }
+        } else {
+            fallback_prompt(&record)
+        };
 
         // Create the run record.
         let run_id = RunId::new_v4();
         let mut run = TaskRun::new(
             run_id.clone(),
             task_id.clone(),
-            record.attempt + 1,
+            next_attempt,
             backend_kind.clone(),
         );
 
@@ -148,33 +178,6 @@ impl Dispatcher {
 
             run.remote_branch = Some(branch.clone());
             Some(branch)
-        };
-
-        // Determine model before building the prompt (template may reference it).
-        let model = record
-            .spec
-            .model_override
-            .clone()
-            .unwrap_or_else(|| self.workflow.models.worker.clone());
-
-        // Build the prompt using the Tera template from WORKFLOW.md when available,
-        // falling back to a minimal format when the template is absent or fails.
-        let prompt = if let Some(template) = &self.config.prompt_template {
-            let builder = PromptBuilder::new(template);
-            match builder.render(&record, &self.workflow, &model) {
-                Ok(rendered) => rendered,
-                Err(e) => {
-                    tracing::error!(
-                        task_id = %task_id,
-                        "Tera template render failed — skipping dispatch: {e}"
-                    );
-                    self.mark_dispatch_failed(&task_id, format!("template render failed: {e}"))
-                        .await?;
-                    return Err(e.into());
-                }
-            }
-        } else {
-            fallback_prompt(&record)
         };
 
         // Build callback URL.
