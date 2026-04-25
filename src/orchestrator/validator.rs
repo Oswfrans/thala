@@ -117,6 +117,18 @@ impl ValidatorCoordinator {
             return Ok(());
         };
 
+        if record.status == TaskStatus::Running {
+            record = apply_transition(&record, Transition::RunCompleted)?;
+            self.store.upsert_task(&record).await?;
+        } else if record.status != TaskStatus::Validating {
+            tracing::warn!(
+                task_id = %task_id,
+                status = %record.status.as_str(),
+                "RunCompleted received for task that is not ready for validation"
+            );
+            return Ok(());
+        }
+
         // Step 1: Review AI.
         let review_outcome = self.review_ai.validate(&run, &record.spec).await?;
 
@@ -163,10 +175,6 @@ impl ValidatorCoordinator {
         updated_run.pr_number = Some(pr_number);
         updated_run.pr_url = Some(pr_url.clone());
         self.store.upsert_run(&updated_run).await?;
-
-        // Transition task to Validating.
-        record = apply_transition(&record, Transition::RunCompleted)?;
-        self.store.upsert_task(&record).await?;
 
         tracing::info!(
             task_id = %task_id,
@@ -525,6 +533,211 @@ fn diff_touches_protected_path(diff: &str, patterns: &[String]) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod validation_flow_tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::ValidatorCoordinator;
+    use crate::adapters::state::SqliteStateStore;
+    use crate::core::error::ThalaError;
+    use crate::core::ids::{RunId, TaskId};
+    use crate::core::run::{ExecutionBackendKind, TaskRun};
+    use crate::core::task::{TaskRecord, TaskSpec, TaskStatus};
+    use crate::core::transitions::{
+        apply_run_transition, apply_transition, RunTransition, Transition,
+    };
+    use crate::core::validation::{ValidationOutcome, ValidatorKind};
+    use crate::core::workflow::WorkflowConfig;
+    use crate::ports::repo::{CiStatus, RepoProvider};
+    use crate::ports::state_store::StateStore;
+    use crate::ports::task_sink::{NewTaskRequest, TaskSink};
+    use crate::ports::validator::Validator;
+
+    struct FailingValidator;
+
+    #[async_trait]
+    impl Validator for FailingValidator {
+        fn kind(&self) -> ValidatorKind {
+            ValidatorKind::ReviewAi
+        }
+
+        async fn validate(
+            &self,
+            run: &TaskRun,
+            _spec: &TaskSpec,
+        ) -> Result<ValidationOutcome, ThalaError> {
+            Ok(ValidationOutcome::fail(
+                run.run_id.clone(),
+                ValidatorKind::ReviewAi,
+                "Review AI rejected the diff",
+                "needs fix",
+            ))
+        }
+    }
+
+    struct UnusedRepo;
+
+    #[async_trait]
+    impl RepoProvider for UnusedRepo {
+        async fn create_worktree(
+            &self,
+            _workspace_root: &Path,
+            _branch: &str,
+            _base_branch: &str,
+            _task_id: &str,
+        ) -> Result<PathBuf, ThalaError> {
+            unreachable!("review failure should not touch repo worktrees")
+        }
+
+        async fn remove_worktree(&self, _worktree_path: &Path) -> Result<(), ThalaError> {
+            unreachable!("review failure should not touch repo worktrees")
+        }
+
+        async fn push_branch(
+            &self,
+            _workspace_root: &Path,
+            _branch: &str,
+            _github_token: &str,
+        ) -> Result<(), ThalaError> {
+            unreachable!("review failure should not push branches")
+        }
+
+        async fn get_diff(&self, _worktree_path: &Path) -> Result<String, ThalaError> {
+            unreachable!("review failure should not fetch repo diffs")
+        }
+
+        async fn create_pr(
+            &self,
+            _branch: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<(u32, String), ThalaError> {
+            unreachable!("review failure should not create PRs")
+        }
+
+        async fn pr_is_merged(&self, _pr_number: u32) -> Result<bool, ThalaError> {
+            unreachable!("review failure should not poll PRs")
+        }
+
+        async fn pr_ci_status(&self, _pr_number: u32) -> Result<CiStatus, ThalaError> {
+            unreachable!("review failure should not poll CI")
+        }
+
+        async fn merge_pr(&self, _pr_number: u32) -> Result<(), ThalaError> {
+            unreachable!("review failure should not merge PRs")
+        }
+    }
+
+    struct NoopSink;
+
+    #[async_trait]
+    impl TaskSink for NoopSink {
+        async fn create_task(&self, _spec: NewTaskRequest) -> Result<String, ThalaError> {
+            Ok("bd-created".into())
+        }
+
+        async fn append_context(&self, _task_id: &str, _context: &str) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn mark_in_progress(&self, _task_id: &str) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn mark_done(&self, _task_id: &str, _pr_number: u32) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn mark_stuck(&self, _task_id: &str, _reason: &str) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn reopen(&self, _task_id: &str) -> Result<(), ThalaError> {
+            Ok(())
+        }
+    }
+
+    fn workflow() -> WorkflowConfig {
+        serde_yaml::from_str(
+            r#"
+product: "example"
+github_repo: "org/repo"
+"#,
+        )
+        .unwrap()
+    }
+
+    fn make_spec(id: &str) -> TaskSpec {
+        TaskSpec {
+            id: TaskId::new(id),
+            title: "Fix review failure path".into(),
+            acceptance_criteria: "Review feedback triggers retry".into(),
+            context: String::new(),
+            beads_ref: id.into(),
+            model_override: None,
+            always_human_review: false,
+            labels: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn review_failure_moves_completed_run_to_retry_dispatching() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStateStore::open(tmp.path().join("state.db")).unwrap());
+        let task_id = TaskId::new("bd-review-retry");
+        let run_id = RunId::new_v4();
+
+        let record = TaskRecord::new(make_spec(task_id.as_str()));
+        let record = apply_transition(&record, Transition::MarkReady).unwrap();
+        let record = apply_transition(&record, Transition::BeginDispatching).unwrap();
+        let record = apply_transition(
+            &record,
+            Transition::RunLaunched {
+                run_id: run_id.clone(),
+            },
+        )
+        .unwrap();
+
+        let run = TaskRun::new(
+            run_id.clone(),
+            task_id.clone(),
+            1,
+            ExecutionBackendKind::Local,
+        );
+        let run = apply_run_transition(&run, RunTransition::Activated).unwrap();
+        let run = apply_run_transition(&run, RunTransition::CompletionSignaled).unwrap();
+
+        store.upsert_task(&record).await.unwrap();
+        store.upsert_run(&run).await.unwrap();
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator = ValidatorCoordinator::new(
+            workflow(),
+            Arc::new(FailingValidator),
+            Arc::new(UnusedRepo),
+            store.clone(),
+            Arc::new(NoopSink),
+            vec![],
+            events_tx,
+        );
+
+        coordinator
+            .handle_run_completed(&task_id, &run_id)
+            .await
+            .unwrap();
+
+        let updated = store.get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Dispatching);
+
+        let updated_run = store.get_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(updated_run.review_cycle, 1);
+        assert_eq!(updated_run.review_feedback.as_deref(), Some("needs fix"));
+    }
 }
 
 #[cfg(test)]

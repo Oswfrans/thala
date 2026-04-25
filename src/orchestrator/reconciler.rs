@@ -110,10 +110,12 @@ impl Reconciler {
                     status = %record.status.as_str(),
                     "Task in active status with no run — re-queuing as Ready"
                 );
-                let mut updated = record.clone();
-                updated.status = TaskStatus::Ready;
-                updated.active_run_id = None;
-                updated.touch();
+                let updated = apply_transition(
+                    record,
+                    Transition::RequeueAfterMissingRun {
+                        reason: "task had active status but no persisted run after restart".into(),
+                    },
+                )?;
                 self.store.upsert_task(&updated).await?;
                 let _ = self
                     .events_tx
@@ -195,20 +197,43 @@ impl Reconciler {
                 Ok(obs) => {
                     if !obs.is_alive {
                         // Worker died while Thala was offline.
+                        let reason = "worker was not alive during restart reconciliation";
                         tracing::warn!(
                             task_id = %record.spec.id,
                             run_id = %run.run_id,
-                            "Worker not alive after restart — treating as completed"
+                            "Worker not alive after restart — treating as failed"
                         );
-                        let updated_run =
-                            apply_run_transition(run, RunTransition::CompletionSignaled)?;
+                        let mut updated_run = run.clone();
+                        if updated_run.status == RunStatus::Launching {
+                            updated_run =
+                                apply_run_transition(&updated_run, RunTransition::Activated)?;
+                            self.store.upsert_run(&updated_run).await?;
+                        }
+
+                        updated_run = apply_run_transition(
+                            &updated_run,
+                            RunTransition::FailureSignaled {
+                                reason: reason.into(),
+                            },
+                        )?;
                         self.store.upsert_run(&updated_run).await?;
+
+                        if record.status == TaskStatus::Running {
+                            let updated_task = apply_transition(
+                                record,
+                                Transition::RunFailed {
+                                    reason: reason.into(),
+                                },
+                            )?;
+                            self.store.upsert_task(&updated_task).await?;
+                        }
 
                         let _ = self
                             .events_tx
-                            .send(OrchestratorEvent::run_completed(
+                            .send(OrchestratorEvent::run_failed(
                                 record.spec.id.clone(),
                                 run.run_id.clone(),
+                                reason,
                             ))
                             .await;
                         return Ok(true);
