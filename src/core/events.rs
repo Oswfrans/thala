@@ -25,9 +25,11 @@ use crate::core::validation::ValidationOutcome;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OrchestratorEvent {
     // ── Routed events ─────────────────────────────────────────────────────────
-
     /// Routed → engine → dispatcher.dispatch.
-    DispatchReady { task_id: TaskId, at: DateTime<Utc> },
+    DispatchReady {
+        task_id: TaskId,
+        at: DateTime<Utc>,
+    },
 
     /// Routed → engine → validator.handle_run_completed.
     RunCompleted {
@@ -60,7 +62,6 @@ pub enum OrchestratorEvent {
     },
 
     // ── Observability-only events (emitted but not consumed by any subsystem) ─
-
     RunLaunched {
         task_id: TaskId,
         run_id: RunId,
@@ -78,8 +79,14 @@ pub enum OrchestratorEvent {
         reason: String,
         at: DateTime<Utc>,
     },
-    RunActivityObserved { run_id: RunId, at: DateTime<Utc> },
-    RunCancelled { run_id: RunId, at: DateTime<Utc> },
+    RunActivityObserved {
+        run_id: RunId,
+        at: DateTime<Utc>,
+    },
+    RunCancelled {
+        run_id: RunId,
+        at: DateTime<Utc>,
+    },
     RunStatusChanged {
         run_id: RunId,
         from: RunStatus,

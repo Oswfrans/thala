@@ -18,7 +18,11 @@ impl Validator for NoopValidator {
         ValidatorKind::Noop
     }
 
-    async fn validate(&self, run: &TaskRun, _spec: &TaskSpec) -> Result<ValidationOutcome, ThalaError> {
+    async fn validate(
+        &self,
+        run: &TaskRun,
+        _spec: &TaskSpec,
+    ) -> Result<ValidationOutcome, ThalaError> {
         Ok(ValidationOutcome::pass(
             run.run_id.clone(),
             ValidatorKind::Noop,

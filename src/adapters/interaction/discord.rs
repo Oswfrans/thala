@@ -49,6 +49,10 @@ pub struct DiscordInteraction {
 
 impl DiscordInteraction {
     pub fn new(config: DiscordInteractionConfig) -> Self {
+        let config = DiscordInteractionConfig {
+            bot_token: normalize_bot_token(&config.bot_token),
+            ..config
+        };
         Self {
             config,
             http: reqwest::Client::new(),
@@ -192,6 +196,29 @@ impl InteractionLayer for DiscordInteraction {
         let resolutions = std::mem::take(&mut *self.pending_resolutions.lock());
         Ok(resolutions)
     }
+}
+
+fn normalize_bot_token(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let token = trimmed.strip_prefix("Bot ").unwrap_or(trimmed).trim();
+
+    expand_env_var(token).unwrap_or_else(|| token.to_string())
+}
+
+fn expand_env_var(raw: &str) -> Option<String> {
+    if let Some(name) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        return std::env::var(name).ok();
+    }
+
+    let name = raw.strip_prefix('$')?;
+    if name
+        .chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        return std::env::var(name).ok();
+    }
+
+    None
 }
 
 // ── Discord message builder ───────────────────────────────────────────────────

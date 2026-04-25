@@ -4,5 +4,6 @@
 //! handles approvals, retries, and escalations on existing tasks.
 
 pub mod discord;
+pub mod discord_webhook;
 pub mod planner;
 pub mod slack;

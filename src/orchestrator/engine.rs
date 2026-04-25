@@ -311,4 +311,3 @@ async fn route_event(
 
     Ok(())
 }
-

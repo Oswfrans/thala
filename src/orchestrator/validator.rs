@@ -15,10 +15,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::core::events::OrchestratorEvent;
-use crate::core::task::TaskStatus;
 use crate::core::ids::{RunId, TaskId};
 use crate::core::interaction::{InteractionAction, InteractionRequest, InteractionRequestKind};
 use crate::core::run::TaskRun;
+use crate::core::task::TaskStatus;
 use crate::core::transitions::{apply_transition, Transition};
 use crate::core::workflow::WorkflowConfig;
 use crate::ports::interaction::InteractionLayer;
@@ -497,7 +497,9 @@ fn diff_touches_protected_path(diff: &str, patterns: &[String]) -> bool {
     let mut builder = GlobSetBuilder::new();
     for p in patterns {
         match Glob::new(p) {
-            Ok(g) => { builder.add(g); }
+            Ok(g) => {
+                builder.add(g);
+            }
             Err(e) => tracing::warn!(pattern = %p, "Invalid protected_path glob: {e}"),
         }
     }
@@ -528,12 +530,16 @@ fn diff_touches_protected_path(diff: &str, patterns: &[String]) -> bool {
 #[cfg(test)]
 mod protected_path_tests {
     use super::diff_touches_protected_path;
+    use std::fmt::Write;
 
     fn diff_with_files(files: &[&str]) -> String {
-        files
-            .iter()
-            .map(|f| format!("+++ b/{f}\n--- a/{f}\n@@ -1 +1 @@\n+change\n"))
-            .collect()
+        files.iter().fold(String::new(), |mut diff, f| {
+            writeln!(diff, "+++ b/{f}").expect("writing to String cannot fail");
+            writeln!(diff, "--- a/{f}").expect("writing to String cannot fail");
+            writeln!(diff, "@@ -1 +1 @@").expect("writing to String cannot fail");
+            writeln!(diff, "+change").expect("writing to String cannot fail");
+            diff
+        })
     }
 
     #[test]
@@ -545,7 +551,10 @@ mod protected_path_tests {
     #[test]
     fn double_star_prefix_matches_anywhere() {
         let diff = diff_with_files(&["src/db/migrations/001_init.sql"]);
-        assert!(diff_touches_protected_path(&diff, &["**/migrations/**".into()]));
+        assert!(diff_touches_protected_path(
+            &diff,
+            &["**/migrations/**".into()]
+        ));
     }
 
     #[test]
