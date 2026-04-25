@@ -149,7 +149,7 @@ merge:
     - "ci"
 
 discord:
-  bot_token: "Bot "
+  bot_token: "Bot <YOUR_DISCORD_BOT_TOKEN>"
   public_key: "YOUR_DISCORD_PUBLIC_KEY"
   alerts_channel_id: "YOUR_DISCORD_CHANNEL_ID"
 
