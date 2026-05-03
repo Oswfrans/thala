@@ -173,6 +173,7 @@ async fn handle_worker_callback(
     let run_id = payload
         .run_id
         .as_deref()
+        .filter(|value| !value.trim().is_empty())
         .map(RunId::from)
         .or_else(|| record.active_run_id.clone())
         .ok_or_else(|| CallbackError::bad_request("run_id missing and task has no active run"))?;
@@ -491,5 +492,70 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn empty_callback_run_id_falls_back_to_active_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStateStore::open(tmp.path().join("state.db")).unwrap());
+        let (events_tx, mut events_rx) = mpsc::channel(4);
+        let state = CallbackState {
+            store: store.clone(),
+            events_tx,
+        };
+
+        let task_id = TaskId::new("bd-callback-empty-run");
+        let run_id = RunId::from("run-callback-active");
+        let mut record = TaskRecord::new(task_spec(task_id.as_str()));
+        record.status = TaskStatus::Running;
+        record.active_run_id = Some(run_id.clone());
+        store.upsert_task(&record).await.unwrap();
+
+        let mut run = TaskRun::new(
+            run_id.clone(),
+            task_id.clone(),
+            1,
+            ExecutionBackendKind::Modal,
+        );
+        run.status = RunStatus::Active;
+        run.callback_token_hash = Some(sha256_hex(b"secret-token"));
+        store.upsert_run(&run).await.unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret-token"),
+        );
+
+        let response = handle_worker_callback(
+            &state,
+            &headers,
+            WorkerCallbackPayload {
+                task_id: task_id.to_string(),
+                run_id: Some(String::new()),
+                status: "success".into(),
+                exit_code: Some(0),
+                error_message: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(response.ok);
+        assert_eq!(response.run_id, run_id.as_str());
+        let updated = store.get_run(&run_id).await.unwrap().unwrap();
+        assert_eq!(updated.status, RunStatus::Completed);
+
+        match events_rx.recv().await.unwrap() {
+            OrchestratorEvent::RunCompleted {
+                task_id: event_task_id,
+                run_id: event_run_id,
+                ..
+            } => {
+                assert_eq!(event_task_id, task_id);
+                assert_eq!(event_run_id, run_id);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

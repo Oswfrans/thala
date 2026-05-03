@@ -165,9 +165,12 @@ impl DiscordInteractionPayload {
 
 #[derive(Debug, Deserialize)]
 struct CommandData {
+    #[serde(default)]
     name: String,
     #[serde(default)]
     options: Vec<CommandOption>,
+    #[serde(default, rename = "custom_id")]
+    custom_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,6 +409,7 @@ async fn handle_interaction(
         let data = payload.data.unwrap_or(CommandData {
             name: String::new(),
             options: Vec::new(),
+            custom_id: None,
         });
         handle_slash_command(
             state,
@@ -417,12 +421,10 @@ async fn handle_interaction(
         )
     } else if payload.is_message_component() {
         // Type 3: Message Component (button click)
-        // Parse component data from the payload
         let custom_id = payload
             .data
             .as_ref()
-            .and_then(|d| d.options.first())
-            .and_then(|o| o.value.as_str())
+            .and_then(|d| d.custom_id.as_deref())
             .unwrap_or("")
             .to_string();
         let component_data = ComponentData { custom_id };
@@ -534,10 +536,10 @@ fn handle_slash_command(
 
 /// Handle button clicks (component interactions).
 fn handle_component_interaction(
-    _state: DiscordWebhookState,
+    state: DiscordWebhookState,
     data: ComponentData,
-    _member: Option<serde_json::Value>,
-    _user: Option<serde_json::Value>,
+    member: Option<serde_json::Value>,
+    user: Option<serde_json::Value>,
 ) -> axum::response::Response {
     // Parse custom_id: "thala:{action}:{interaction_id}:{run_id}:{task_id}"
     let parts: Vec<&str> = data.custom_id.split(':').collect();
@@ -546,6 +548,23 @@ fn handle_component_interaction(
     }
 
     let action = parts[1];
+
+    if let Some(interaction) = &state.interaction {
+        let payload = json!({
+            "data": {
+                "custom_id": data.custom_id,
+            },
+            "member": member,
+            "user": user,
+        });
+
+        if let Err(e) = interaction.receive_interaction(&payload) {
+            tracing::warn!("Failed to record Discord component interaction: {e}");
+            return reply_response("Failed to process interaction");
+        }
+    } else {
+        return reply_response("Discord interaction handling is not enabled.");
+    }
 
     // Acknowledge the interaction - type 4
     let response = DiscordResponse::channel_message_with_source(ResponseData {
@@ -636,6 +655,28 @@ fn expand_env_var(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_payload_deserializes_custom_id_without_command_name() {
+        let payload: DiscordInteractionPayload = serde_json::from_value(json!({
+            "type": 3,
+            "data": {
+                "custom_id": "thala:retry:int-1:run-1:task-1"
+            },
+            "member": {
+                "user": {
+                    "id": "user-1"
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(payload.is_message_component());
+        assert_eq!(
+            payload.data.unwrap().custom_id.as_deref(),
+            Some("thala:retry:int-1:run-1:task-1")
+        );
+    }
     use ed25519_dalek::{Signer, SigningKey};
 
     #[test]

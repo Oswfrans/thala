@@ -69,7 +69,7 @@ worker_image = (
 #   THALA_TASK_ID=TEST-1 ... modal run dev/infra/modal_worker.py::run_worker
 # The _task_secret below picks them up automatically when present.
 _LOCAL_TASK_VARS = [
-    "THALA_TASK_ID", "THALA_TASK_BRANCH", "THALA_GITHUB_REPO",
+    "THALA_RUN_ID", "THALA_TASK_ID", "THALA_TASK_BRANCH", "THALA_GITHUB_REPO",
     "THALA_CALLBACK_URL", "THALA_RUN_TOKEN", "THALA_MODEL",
     "THALA_PROMPT_B64", "THALA_AFTER_CREATE_HOOK", "THALA_BEFORE_RUN_HOOK",
     "THALA_AFTER_RUN_HOOK", "GITHUB_TOKEN",

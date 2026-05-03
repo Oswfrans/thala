@@ -157,26 +157,59 @@ impl ExecutionBackend for ModalBackend {
             .spawn()
             .map_err(|e| ThalaError::backend("modal", format!("failed to spawn modal: {e}")))?;
 
-        // Read stdout line by line until we see the app/function-call ID or time out.
+        // Read stdout/stderr line by line until we see the app/function-call ID
+        // or time out. Modal emits progress on stderr in some CLI versions.
         // Once we have the ID we kill the local CLI — the remote job keeps running
         // because of --detach.
         let stdout_handle = child.stdout.take().expect("piped stdout");
-        let mut lines = BufReader::new(stdout_handle).lines();
+        let stderr_handle = child.stderr.take().expect("piped stderr");
+        let mut stdout_lines = BufReader::new(stdout_handle).lines();
+        let mut stderr_lines = BufReader::new(stderr_handle).lines();
 
         let job_id = tokio::time::timeout(Duration::from_secs(90), async {
-            let mut found: Option<String> = None;
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(task_id = %req.task_id, "modal: {line}");
-                if let Some(id) = parse_modal_job_id(&line) {
-                    found = Some(id);
-                    break;
+            let mut stdout_open = true;
+            let mut stderr_open = true;
+
+            while stdout_open || stderr_open {
+                tokio::select! {
+                    line = stdout_lines.next_line(), if stdout_open => {
+                        match line {
+                            Ok(Some(line)) => {
+                                tracing::debug!(task_id = %req.task_id, "modal stdout: {line}");
+                                if let Some(id) = parse_modal_job_id(&line) {
+                                    return Some(id);
+                                }
+                            }
+                            Ok(None) => stdout_open = false,
+                            Err(e) => {
+                                tracing::debug!(task_id = %req.task_id, "modal stdout read failed: {e}");
+                                stdout_open = false;
+                            }
+                        }
+                    }
+                    line = stderr_lines.next_line(), if stderr_open => {
+                        match line {
+                            Ok(Some(line)) => {
+                                tracing::debug!(task_id = %req.task_id, "modal stderr: {line}");
+                                if let Some(id) = parse_modal_job_id(&line) {
+                                    return Some(id);
+                                }
+                            }
+                            Ok(None) => stderr_open = false,
+                            Err(e) => {
+                                tracing::debug!(task_id = %req.task_id, "modal stderr read failed: {e}");
+                                stderr_open = false;
+                            }
+                        }
+                    }
                 }
             }
-            found
+
+            None
         })
         .await
         .map_err(|_| ThalaError::backend("modal", "timed out waiting for Modal app ID"))?
-        .unwrap_or_else(|| req.run_id.clone());
+        .ok_or_else(|| ThalaError::backend("modal", "Modal CLI did not print an app or call ID"))?;
 
         // Kill the local CLI process — the remote Modal job keeps running.
         child.kill().await.ok();
@@ -324,23 +357,45 @@ fn hash_string(s: &str) -> String {
     hex::encode(Sha256::digest(s.as_bytes()))
 }
 
-/// Parse the Modal app/function-call ID from `modal run` stdout.
+/// Parse the Modal app/function-call ID from `modal run` output.
 ///
 /// Modal CLI prints a line containing the app ID (prefixed "ap-") or a
 /// function-call ID (prefixed "fc-") in its output. We look for either prefix.
-/// If neither is found we return None and the caller falls back to the run_id.
 fn parse_modal_job_id(stdout: &str) -> Option<String> {
     // Modal CLI output examples:
     //   "✓ Created app: ap-abc123def456"
     //   "Running app: fc-xyz789uvw012"
-    // We search for any token starting with "ap-" or "fc-".
-    for line in stdout.lines() {
-        for token in line.split_whitespace() {
-            let token = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
-            if token.starts_with("ap-") || token.starts_with("fc-") {
-                return Some(token.to_string());
-            }
+    // Search inside URLs and progress text, not only whitespace-delimited tokens.
+    for token in stdout.split(|c: char| !c.is_alphanumeric() && c != '-') {
+        if token.starts_with("ap-") || token.starts_with("fc-") {
+            return Some(token.to_string());
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_modal_job_id;
+
+    #[test]
+    fn parses_modal_id_from_plain_output() {
+        assert_eq!(
+            parse_modal_job_id("Created app: ap-abc123"),
+            Some("ap-abc123".into())
+        );
+    }
+
+    #[test]
+    fn parses_modal_id_from_url_output() {
+        assert_eq!(
+            parse_modal_job_id("View run at https://modal.com/apps/ap-abc123/main"),
+            Some("ap-abc123".into())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_modal_id_is_missing() {
+        assert_eq!(parse_modal_job_id("Running detached."), None);
+    }
 }

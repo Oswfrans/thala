@@ -54,7 +54,7 @@ impl TaskSink for BeadsTaskSink {
             "create",
             "--title",
             &req.title,
-            "--acceptance-criteria",
+            "--acceptance",
             &req.acceptance_criteria,
         ];
 

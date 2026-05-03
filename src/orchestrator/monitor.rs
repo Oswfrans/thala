@@ -140,6 +140,24 @@ impl Monitor {
                             at: chrono::Utc::now(),
                         })
                         .await;
+                } else {
+                    tracing::warn!(
+                        run_id = %run.run_id,
+                        task_id = %run.task_id,
+                        "Worker never became observable — treating launch as failed"
+                    );
+                    let reason = "worker never became observable after launch";
+                    let active = apply_run_transition(run, RunTransition::Activated)?;
+                    self.store.upsert_run(&active).await?;
+                    let updated = apply_run_transition(
+                        &active,
+                        RunTransition::FailureSignaled {
+                            reason: reason.into(),
+                        },
+                    )?;
+                    self.store.upsert_run(&updated).await?;
+                    self.handle_run_failed(&run.task_id, &run.run_id, reason)
+                        .await?;
                 }
             }
 

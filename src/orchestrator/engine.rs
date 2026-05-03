@@ -174,6 +174,7 @@ impl OrchestratorEngine {
         tokio::spawn(async move { v.run(Duration::from_secs(60)).await });
 
         let store = self.store.clone();
+        let sink = self.sink.clone();
         let interaction_layers = self.interaction_layers.clone();
 
         // Step 3: Event routing loop (main loop).
@@ -182,10 +183,12 @@ impl OrchestratorEngine {
             let dispatcher = dispatcher.clone();
             let validator = validator.clone();
             let store = store.clone();
+            let sink = sink.clone();
             let layers = interaction_layers.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = route_event(event, dispatcher, validator, store, layers).await {
+                if let Err(e) = route_event(event, dispatcher, validator, store, sink, layers).await
+                {
                     tracing::error!("Event routing error: {e}");
                 }
             });
@@ -203,6 +206,7 @@ async fn route_event(
     dispatcher: Arc<Dispatcher>,
     validator: Arc<ValidatorCoordinator>,
     store: Arc<dyn StateStore>,
+    sink: Arc<dyn TaskSink>,
     interaction_layers: Vec<Arc<dyn InteractionLayer>>,
 ) -> anyhow::Result<()> {
     match event {
@@ -224,6 +228,15 @@ async fn route_event(
             task_id, run_id, ..
         } => {
             tracing::warn!(task_id = %task_id, run_id = %run_id, "Routing RunTimedOut");
+            if let Err(e) = sink
+                .mark_stuck(
+                    task_id.as_str(),
+                    "Stall timeout: no worker output within the configured window",
+                )
+                .await
+            {
+                tracing::warn!(task_id = %task_id, "Failed to sync timeout to Beads: {e}");
+            }
 
             let req = InteractionRequest::new(
                 task_id.clone(),
@@ -254,6 +267,53 @@ async fn route_event(
                     tracing::warn!(
                         channel = layer.name(),
                         "Failed to send stuck notification: {e}"
+                    );
+                }
+            }
+        }
+
+        OrchestratorEvent::RunFailed {
+            task_id,
+            run_id,
+            reason,
+            ..
+        } => {
+            tracing::warn!(task_id = %task_id, run_id = %run_id, "Routing RunFailed");
+            if let Err(e) = sink.mark_stuck(task_id.as_str(), &reason).await {
+                tracing::warn!(task_id = %task_id, "Failed to sync failed run to Beads: {e}");
+            }
+
+            let req = InteractionRequest::new(
+                task_id.clone(),
+                run_id.clone(),
+                InteractionRequestKind::StuckNotification {
+                    reason: reason.clone(),
+                },
+                format!("[Failed] Task {task_id}"),
+                format!(
+                    "Task `{task_id}` (run `{run_id}`) failed.\n\
+                     Reason: {reason}\n\
+                     Manual intervention is required."
+                ),
+                vec![
+                    InteractionAction::Retry,
+                    InteractionAction::Reroute {
+                        backend: "local".into(),
+                    },
+                    InteractionAction::Close,
+                ],
+            );
+
+            let ticket = InteractionTicket::new(req.clone());
+            if let Err(e) = store.save_ticket(&ticket).await {
+                tracing::error!(task_id = %task_id, "Failed to persist failed-run ticket: {e}");
+            }
+
+            for layer in &interaction_layers {
+                if let Err(e) = layer.send(&req).await {
+                    tracing::warn!(
+                        channel = layer.name(),
+                        "Failed to send failed-run notification: {e}"
                     );
                 }
             }
