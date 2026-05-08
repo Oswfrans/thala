@@ -430,7 +430,7 @@ fn print_summary(config: &WizardConfig) {
         &config.discord_bot_token[..20.min(config.discord_bot_token.len())]
     );
     println!("     -H \"Content-Type: application/json\" \\");
-    println!("     -d '{{\"name\":\"thala\",\"description\":\"Create a Thala task\",\"options\":[{{\"name\":\"description\",\"description\":\"Task description\",\"type\":3,\"required\":true}}]}}'");
+    println!("     -d '[{{\"name\":\"thala\",\"description\":\"Manage Thala tasks\",\"options\":[{{\"type\":1,\"name\":\"create\",\"description\":\"Create a Thala task\",\"options\":[{{\"type\":3,\"name\":\"description\",\"description\":\"What should be done?\",\"required\":true}}]}}]}}]'");
     println!();
     println!("3. Start Thala:");
     println!("   Option A - Foreground: cargo run --release -- run");

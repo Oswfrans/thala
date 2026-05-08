@@ -176,7 +176,10 @@ struct CommandData {
 #[derive(Debug, Deserialize)]
 struct CommandOption {
     name: String,
+    #[serde(default)]
     value: serde_json::Value,
+    #[serde(default)]
+    options: Vec<CommandOption>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -473,24 +476,7 @@ fn handle_slash_command(
 
     match data.name.as_str() {
         "thala" | "create" => {
-            // Extract description from options
-            let description = data
-                .options
-                .iter()
-                .find(|o| o.name == "description")
-                .and_then(|o| o.value.as_str())
-                .map_or_else(
-                    || {
-                        // Try to extract from "task" option if present
-                        data.options
-                            .iter()
-                            .find(|o| o.name == "task")
-                            .and_then(|o| o.value.as_str())
-                            .map(std::string::ToString::to_string)
-                            .unwrap_or_default()
-                    },
-                    std::string::ToString::to_string,
-                );
+            let description = extract_create_description(&data.options).unwrap_or_default();
 
             if description.is_empty() {
                 return reply_response(
@@ -532,6 +518,20 @@ fn handle_slash_command(
         }
         _ => reply_response("Unknown command. Available: `/thala create <description>`"),
     }
+}
+
+fn extract_create_description(options: &[CommandOption]) -> Option<String> {
+    options
+        .iter()
+        .find(|o| o.name == "description" || o.name == "task")
+        .and_then(|o| o.value.as_str())
+        .map(std::string::ToString::to_string)
+        .or_else(|| {
+            options
+                .iter()
+                .find(|o| o.name == "create")
+                .and_then(|o| extract_create_description(&o.options))
+        })
 }
 
 /// Handle button clicks (component interactions).
@@ -677,6 +677,44 @@ mod tests {
             Some("thala:retry:int-1:run-1:task-1")
         );
     }
+
+    #[test]
+    fn extracts_description_from_top_level_option() {
+        let data: CommandData = serde_json::from_value(json!({
+            "name": "thala",
+            "options": [
+                {"name": "description", "value": "Build the thing"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            extract_create_description(&data.options).as_deref(),
+            Some("Build the thing")
+        );
+    }
+
+    #[test]
+    fn extracts_description_from_create_subcommand() {
+        let data: CommandData = serde_json::from_value(json!({
+            "name": "thala",
+            "options": [
+                {
+                    "name": "create",
+                    "options": [
+                        {"name": "description", "value": "Build the nested thing"}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            extract_create_description(&data.options).as_deref(),
+            Some("Build the nested thing")
+        );
+    }
+
     use ed25519_dalek::{Signer, SigningKey};
 
     #[test]
