@@ -157,16 +157,18 @@ impl ExecutionBackend for ModalBackend {
             .spawn()
             .map_err(|e| ThalaError::backend("modal", format!("failed to spawn modal: {e}")))?;
 
-        // Read stdout/stderr line by line until we see the app/function-call ID
-        // or time out. Modal emits progress on stderr in some CLI versions.
-        // Once we have the ID we kill the local CLI — the remote job keeps running
-        // because of --detach.
+        // Read stdout/stderr line by line until the detached launch exits or
+        // times out. Modal emits progress on stderr in some CLI versions.
+        // The app ID can appear before the remote function is scheduled, so
+        // keep the local CLI alive through the launch window.
         let stdout_handle = child.stdout.take().expect("piped stdout");
         let stderr_handle = child.stderr.take().expect("piped stderr");
         let mut stdout_lines = BufReader::new(stdout_handle).lines();
         let mut stderr_lines = BufReader::new(stderr_handle).lines();
 
+        let mut launch_output = String::new();
         let job_id = tokio::time::timeout(Duration::from_secs(90), async {
+            let mut job_id: Option<String> = None;
             let mut stdout_open = true;
             let mut stderr_open = true;
 
@@ -176,8 +178,10 @@ impl ExecutionBackend for ModalBackend {
                         match line {
                             Ok(Some(line)) => {
                                 tracing::debug!(task_id = %req.task_id, "modal stdout: {line}");
-                                if let Some(id) = parse_modal_job_id(&line) {
-                                    return Some(id);
+                                launch_output.push_str(&line);
+                                launch_output.push('\n');
+                                if job_id.is_none() {
+                                    job_id = parse_modal_job_id(&line);
                                 }
                             }
                             Ok(None) => stdout_open = false,
@@ -191,8 +195,10 @@ impl ExecutionBackend for ModalBackend {
                         match line {
                             Ok(Some(line)) => {
                                 tracing::debug!(task_id = %req.task_id, "modal stderr: {line}");
-                                if let Some(id) = parse_modal_job_id(&line) {
-                                    return Some(id);
+                                launch_output.push_str(&line);
+                                launch_output.push('\n');
+                                if job_id.is_none() {
+                                    job_id = parse_modal_job_id(&line);
                                 }
                             }
                             Ok(None) => stderr_open = false,
@@ -205,15 +211,47 @@ impl ExecutionBackend for ModalBackend {
                 }
             }
 
-            None
+            job_id
         })
-        .await
-        .map_err(|_| ThalaError::backend("modal", "timed out waiting for Modal app ID"))?
-        .ok_or_else(|| ThalaError::backend("modal", "Modal CLI did not print an app or call ID"))?;
+        .await;
 
-        // Kill the local CLI process — the remote Modal job keeps running.
-        child.kill().await.ok();
-        child.wait().await.ok();
+        let job_id = match job_id {
+            Ok(Some(job_id)) => job_id,
+            Ok(None) => {
+                let status = child.wait().await.ok();
+                return Err(ThalaError::backend(
+                    "modal",
+                    format!(
+                        "Modal CLI did not print an app or call ID{}{}",
+                        status
+                            .map(|s| format!(" before exiting with status {s}"))
+                            .unwrap_or_default(),
+                        if launch_output.trim().is_empty() {
+                            String::new()
+                        } else {
+                            format!("; output: {}", launch_output.trim())
+                        }
+                    ),
+                ));
+            }
+            Err(_) => {
+                if let Some(job_id) = parse_modal_job_id(&launch_output) {
+                    // Modal 1.x may keep streaming logs after the detached app is
+                    // scheduled. Once the launch window has elapsed and we have
+                    // an id, stop the local CLI; the detached app continues.
+                    child.kill().await.ok();
+                    child.wait().await.ok();
+                    job_id
+                } else {
+                    child.kill().await.ok();
+                    child.wait().await.ok();
+                    return Err(ThalaError::backend(
+                        "modal",
+                        "timed out waiting for Modal app ID",
+                    ));
+                }
+            }
+        };
 
         tracing::info!(
             task_id = %req.task_id,

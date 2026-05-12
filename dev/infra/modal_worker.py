@@ -226,10 +226,17 @@ def run_worker() -> int:
     # ── Run OpenCode ──────────────────────────────────────────────────────────
     print(f"[thala-worker] Launching OpenCode (model={model})")
     opencode_result = subprocess.run(
-        ["opencode", "--model", model, "--no-session", "-p", prompt],
+        ["opencode", "run", "--model", model, prompt],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
         env={**os.environ},  # pass through API keys etc.
     )
+    opencode_output = opencode_result.stdout or ""
+    print(opencode_output, end="")
     exit_code = opencode_result.returncode
+    if "ProviderModelNotFoundError" in opencode_output or "Model not found" in opencode_output:
+        exit_code = 1
     print(f"[thala-worker] OpenCode exited with code {exit_code}")
 
     # ── after_run hook ────────────────────────────────────────────────────────

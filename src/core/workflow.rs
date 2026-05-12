@@ -227,7 +227,7 @@ impl Default for LimitsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
-    /// Model for worker execution sessions (e.g. "opencode/kimi-k2.5").
+    /// Model for worker execution sessions (e.g. "openrouter/moonshotai/kimi-k2.5").
     #[serde(default = "default_worker_model")]
     pub worker: String,
 
@@ -241,7 +241,7 @@ pub struct ModelConfig {
 }
 
 fn default_worker_model() -> String {
-    "opencode/kimi-k2.5".into()
+    "openrouter/moonshotai/kimi-k2.5".into()
 }
 fn default_manager_model() -> String {
     "anthropic/claude-opus-4-6".into()

@@ -31,7 +31,7 @@ pub struct LaunchRequest {
     /// Fully rendered prompt text delivered to the worker.
     pub prompt: String,
 
-    /// Model string passed to the worker (e.g. "opencode/kimi-k2.5").
+    /// Model string passed to the worker (e.g. "openrouter/moonshotai/kimi-k2.5").
     pub model: String,
 
     /// Absolute path to the workspace root on the Thala host.

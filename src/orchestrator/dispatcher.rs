@@ -19,9 +19,9 @@ use tokio::sync::mpsc;
 
 use crate::core::events::OrchestratorEvent;
 use crate::core::ids::{RunId, TaskId};
-use crate::core::run::TaskRun;
+use crate::core::run::{RunStatus, TaskRun};
 use crate::core::task::{TaskRecord, TaskStatus};
-use crate::core::transitions::{apply_transition, Transition};
+use crate::core::transitions::{apply_run_transition, apply_transition, RunTransition, Transition};
 use crate::core::workflow::WorkflowConfig;
 use crate::orchestrator::prompt_builder::{fallback_prompt, PromptBuilder};
 use crate::ports::backend_router::BackendRouter;
@@ -190,6 +190,11 @@ impl Dispatcher {
 
         let github_token = std::env::var(&self.workflow.execution.github_token_env).ok();
 
+        // Persist the launch attempt before starting remote work. Fast remote
+        // failures can call back before `launch()` returns; the callback server
+        // must be able to find the run and validate its token.
+        self.store.upsert_run(&run).await?;
+
         // Build and send the launch request.
         let req = LaunchRequest {
             run_id: run_id.as_str().to_string(),
@@ -214,13 +219,24 @@ impl Dispatcher {
         let launched = match backend.launch(req).await {
             Ok(launched) => launched,
             Err(e) => {
+                run = apply_run_transition(
+                    &run,
+                    RunTransition::FailureSignaled {
+                        reason: format!("backend launch failed: {e}"),
+                    },
+                )?;
+                self.store.upsert_run(&run).await?;
                 self.mark_dispatch_failed(&task_id, format!("backend launch failed: {e}"))
                     .await?;
                 return Err(e.into());
             }
         };
 
-        // Update the run with handle and worktree info.
+        // Update the run with handle and worktree info. Reload first because a
+        // fast remote worker can complete and call back before `launch()`
+        // returns.
+        run = self.store.get_run(&run_id).await?.unwrap_or(run);
+        let terminal_status = run.status.is_terminal().then_some(run.status.clone());
         run.handle = Some(launched.handle.clone());
         run.worktree_path = launched
             .worktree_path
@@ -238,6 +254,49 @@ impl Dispatcher {
             },
         )?;
         self.store.upsert_task(&record).await?;
+
+        if let Some(status) = terminal_status {
+            match status {
+                RunStatus::Completed => {
+                    record = apply_transition(&record, Transition::RunCompleted)?;
+                    self.store.upsert_task(&record).await?;
+                    let _ = self
+                        .events_tx
+                        .send(OrchestratorEvent::run_completed(
+                            task_id.clone(),
+                            run_id.clone(),
+                        ))
+                        .await;
+                }
+                RunStatus::Failed | RunStatus::TimedOut => {
+                    let reason = "worker completed before launch returned".to_string();
+                    record = match status {
+                        RunStatus::TimedOut => apply_transition(
+                            &record,
+                            Transition::RunStalled {
+                                reason: reason.clone(),
+                            },
+                        )?,
+                        _ => apply_transition(
+                            &record,
+                            Transition::RunFailed {
+                                reason: reason.clone(),
+                            },
+                        )?,
+                    };
+                    self.store.upsert_task(&record).await?;
+                    let _ = self
+                        .events_tx
+                        .send(OrchestratorEvent::run_failed(
+                            task_id.clone(),
+                            run_id.clone(),
+                            reason,
+                        ))
+                        .await;
+                }
+                RunStatus::Cancelled | RunStatus::Launching | RunStatus::Active => {}
+            }
+        }
 
         // Write in_progress back to Beads.
         if let Err(e) = self.sink.mark_in_progress(task_id.as_str()).await {
