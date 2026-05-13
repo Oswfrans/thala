@@ -60,6 +60,16 @@ pub fn run_enhanced_onboard() -> anyhow::Result<()> {
         println!("       systemctl --user start thala");
     }
 
+    if prompt_yes_no(
+        "Write Discord router service file for multi-repo Discord setups?",
+        false,
+    ) {
+        write_discord_router_service()?;
+        println!("✓ ~/.config/systemd/user/thala-discord-router.service written");
+        println!("  Run: systemctl --user daemon-reload");
+        println!("       systemctl --user start thala-discord-router");
+    }
+
     // Print summary
     print_summary(&config);
 
@@ -132,7 +142,7 @@ impl WizardConfig {
 
         println!("\n─── Model Configuration ──────────────────────────────────────────────");
 
-        let worker_model = prompt("Worker model", "opencode/kimi-k2.5");
+        let worker_model = prompt("Worker model", "openrouter/moonshotai/kimi-k2.5");
         let manager_model = prompt("Manager model", "anthropic/claude-opus-4-6");
 
         println!("\n─── Limits ─────────────────────────────────────────────────────────────");
@@ -410,6 +420,47 @@ WantedBy=default.target
     Ok(())
 }
 
+/// Write a systemd service file for the optional Discord interaction router.
+fn write_discord_router_service() -> anyhow::Result<()> {
+    let home_dir = BaseDirs::new()
+        .ok_or_else(|| anyhow::anyhow!("Could not find base directories"))?
+        .home_dir()
+        .to_path_buf();
+    let systemd_dir = home_dir.join(".config/systemd/user");
+    std::fs::create_dir_all(&systemd_dir)?;
+
+    let service_path = systemd_dir.join("thala-discord-router.service");
+    let thala_root = std::env::current_dir()
+        .unwrap_or_else(|_| home_dir.join("thala"))
+        .display()
+        .to_string();
+    let content = format!(
+        r#"[Unit]
+Description=Thala Discord Interaction Router
+After=network.target thala.service thala-chiropro.service
+
+[Service]
+Type=simple
+Environment="THALA_DISCORD_ROUTER_BIND=127.0.0.1:8792"
+Environment="THALA_ROUTER_MAIN_URL=http://127.0.0.1:8789/api/discord/interaction"
+Environment="THALA_ROUTER_CHIROPRO_URL=http://127.0.0.1:8791/api/discord/interaction"
+Environment="THALA_ROUTER_CHIROPRO_HINTS=chiropro,chiro pro,makotec-xyz/chiropro,github.com/makotec-xyz/chiropro"
+Environment="THALA_ROUTER_DEFAULT_TARGET=main"
+WorkingDirectory={thala_root}
+ExecStart=/usr/bin/python3 {thala_root}/dev/infra/discord_router.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"#,
+        thala_root = thala_root,
+    );
+
+    std::fs::write(&service_path, content)?;
+    Ok(())
+}
+
 /// Print setup summary.
 fn print_summary(config: &WizardConfig) {
     println!("\n╔══════════════════════════════════════════════════════════════════╗");
@@ -430,7 +481,7 @@ fn print_summary(config: &WizardConfig) {
         &config.discord_bot_token[..20.min(config.discord_bot_token.len())]
     );
     println!("     -H \"Content-Type: application/json\" \\");
-    println!("     -d '{{\"name\":\"thala\",\"description\":\"Create a Thala task\",\"options\":[{{\"name\":\"description\",\"description\":\"Task description\",\"type\":3,\"required\":true}}]}}'");
+    println!("     -d '[{{\"name\":\"thala\",\"description\":\"Manage Thala tasks\",\"options\":[{{\"type\":1,\"name\":\"create\",\"description\":\"Create a Thala task\",\"options\":[{{\"type\":3,\"name\":\"description\",\"description\":\"What should be done?\",\"required\":true}}]}}]}}]'");
     println!();
     println!("3. Start Thala:");
     println!("   Option A - Foreground: cargo run --release -- run");
@@ -439,8 +490,13 @@ fn print_summary(config: &WizardConfig) {
     println!("4. Test in Discord:");
     println!("   /thala create Add a navbar with home and about links");
     println!();
-    println!("5. Monitor logs:");
+    println!("5. For multiple Thala services sharing one Discord app:");
+    println!("   Point Discord at https://YOUR_DOMAIN/api/discord/interaction");
+    println!("   Run thala-discord-router and route with message hints such as `chiropro:`");
+    println!();
+    println!("6. Monitor logs:");
     println!("   journalctl --user -u thala -f");
+    println!("   journalctl --user -u thala-discord-router -f");
     println!();
     println!("Documentation:");
     println!(

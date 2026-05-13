@@ -1,0 +1,18 @@
+[Unit]
+Description=Thala Discord Interaction Router
+After=network.target thala.service thala-chiropro.service
+
+[Service]
+Type=simple
+Environment="THALA_DISCORD_ROUTER_BIND=127.0.0.1:8792"
+Environment="THALA_ROUTER_MAIN_URL=http://127.0.0.1:8789/api/discord/interaction"
+Environment="THALA_ROUTER_CHIROPRO_URL=http://127.0.0.1:8791/api/discord/interaction"
+Environment="THALA_ROUTER_CHIROPRO_HINTS=chiropro,chiro pro,makotec-xyz/chiropro,github.com/makotec-xyz/chiropro"
+Environment="THALA_ROUTER_DEFAULT_TARGET=main"
+WorkingDirectory=%h/thala
+ExecStart=/usr/bin/python3 %h/thala/dev/infra/discord_router.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

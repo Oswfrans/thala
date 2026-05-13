@@ -117,15 +117,17 @@ impl Scheduler {
             return Ok(0);
         }
 
-        // Build a set of task IDs that are already in-flight.
+        // Build a set of task IDs that are already in-flight. Ready records are
+        // eligible for dispatch; they can appear after recovery or restart.
         let in_flight_ids: std::collections::HashSet<String> = active
             .iter()
             .filter(|r| {
-                !matches!(
+                matches!(
                     r.status,
-                    crate::core::task::TaskStatus::Succeeded
-                        | crate::core::task::TaskStatus::Failed
-                        | crate::core::task::TaskStatus::Resolved
+                    crate::core::task::TaskStatus::Dispatching
+                        | crate::core::task::TaskStatus::Running
+                        | crate::core::task::TaskStatus::WaitingForHuman
+                        | crate::core::task::TaskStatus::Validating
                 )
             })
             .map(|r| r.spec.id.as_str().to_string())
@@ -162,5 +164,67 @@ impl Scheduler {
         }
 
         Ok(dispatched)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    use crate::adapters::state::SqliteStateStore;
+    use crate::core::error::ThalaError;
+    use crate::core::ids::TaskId;
+    use crate::core::task::{TaskRecord, TaskSpec, TaskStatus};
+
+    struct StaticTaskSource {
+        ready: Vec<TaskSpec>,
+    }
+
+    #[async_trait]
+    impl TaskSource for StaticTaskSource {
+        async fn fetch_ready(&self) -> Result<Vec<TaskSpec>, ThalaError> {
+            Ok(self.ready.clone())
+        }
+
+        async fn fetch_by_id(&self, _task_id: &str) -> Result<Option<TaskSpec>, ThalaError> {
+            Ok(None)
+        }
+    }
+
+    fn task_spec(id: &str) -> TaskSpec {
+        TaskSpec {
+            id: TaskId::new(id),
+            title: "Recovered task".into(),
+            acceptance_criteria: "Dispatch this task".into(),
+            context: String::new(),
+            beads_ref: id.into(),
+            model_override: None,
+            always_human_review: false,
+            labels: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn tick_dispatches_ready_local_record_returned_by_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStateStore::open(dir.path().join("state.db")).unwrap());
+        let spec = task_spec("bd-recovered");
+        let mut record = TaskRecord::new(spec.clone());
+        record.status = TaskStatus::Ready;
+        store.upsert_task(&record).await.unwrap();
+
+        let source = Arc::new(StaticTaskSource { ready: vec![spec] });
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let scheduler = Scheduler::new(SchedulerConfig::default(), source, store, events_tx);
+
+        assert_eq!(scheduler.tick().await.unwrap(), 1);
+
+        match events_rx.try_recv().unwrap() {
+            OrchestratorEvent::DispatchReady { task_id, .. } => {
+                assert_eq!(task_id.as_str(), "bd-recovered");
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 }

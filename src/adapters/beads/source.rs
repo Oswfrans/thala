@@ -96,6 +96,17 @@ impl BeadsTaskSource {
             labels,
         })
     }
+
+    fn parse_show_output(value: &serde_json::Value) -> Option<TaskSpec> {
+        if let Some(spec) = Self::parse_spec(value) {
+            return Some(spec);
+        }
+
+        value
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(Self::parse_spec)
+    }
 }
 
 #[async_trait]
@@ -135,6 +146,47 @@ impl TaskSource for BeadsTaskSource {
         let issue: serde_json::Value = serde_json::from_str(stdout.trim())
             .map_err(|e| ThalaError::beads(format!("Failed to parse `bd show` output: {e}")))?;
 
-        Ok(Self::parse_spec(&issue))
+        Ok(Self::parse_show_output(&issue))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BeadsTaskSource;
+
+    #[test]
+    fn parse_show_output_accepts_single_issue_object() {
+        let issue = serde_json::json!({
+            "id": "thala-test",
+            "title": "Test task",
+            "description": "Context",
+            "acceptance_criteria": "It works",
+            "status": "open"
+        });
+
+        let spec = BeadsTaskSource::parse_show_output(&issue).unwrap();
+
+        assert_eq!(spec.id.as_str(), "thala-test");
+        assert_eq!(spec.title, "Test task");
+        assert_eq!(spec.acceptance_criteria, "It works");
+    }
+
+    #[test]
+    fn parse_show_output_accepts_single_issue_array() {
+        let issue = serde_json::json!([
+            {
+                "id": "thala-test",
+                "title": "Test task",
+                "description": "Context",
+                "acceptanceCriteria": "It works",
+                "status": "open"
+            }
+        ]);
+
+        let spec = BeadsTaskSource::parse_show_output(&issue).unwrap();
+
+        assert_eq!(spec.id.as_str(), "thala-test");
+        assert_eq!(spec.title, "Test task");
+        assert_eq!(spec.acceptance_criteria, "It works");
     }
 }

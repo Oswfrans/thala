@@ -16,7 +16,7 @@ execution:
   callback_base_url: https://thala.makotec.xyz
 
 models:
-  worker: "opencode/kimi-k2.5"
+  worker: "openrouter/moonshotai/kimi-k2.5"
   manager: "anthropic/claude-opus-4-6"
   max_review_cycles: 2
 

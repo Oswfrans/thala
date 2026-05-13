@@ -10,6 +10,35 @@ Thala is an opinionated open-source agent development framework for turning Bead
 
 Model routing is config-driven via `WORKFLOW.md`. Beads is the supported tracker.
 
+## Multi-Repo Discord Routing
+
+One Discord application can front multiple Thala services. Run one Thala
+process per repo, give each process its own callback/Discord bind ports and
+`XDG_DATA_HOME`, then put `dev/infra/discord_router.py` behind Discord's single
+interaction endpoint. The router preserves Discord's signed request body and
+forwards it to the matching Thala service based on command text hints or button
+task-id prefixes.
+
+```
+                         ┌──────────────────────────────┐
+                         │ Discord interaction endpoint │
+                         │ /api/discord/interaction     │
+                         └──────────────┬───────────────┘
+                                        │ signed payload
+                                        ▼
+                         ┌──────────────────────────────┐
+                         │ thala-discord-router :8792   │
+                         └───────┬────────────────┬─────┘
+                                 │                │
+                    default/thala│                │ chiropro hints or
+                                 │                │ chiropro-* buttons
+                                 ▼                ▼
+                    ┌────────────────┐   ┌────────────────────┐
+                    │ Thala :8789    │   │ Chiropro :8791     │
+                    │ callbacks:8788 │   │ callbacks:8790     │
+                    └────────────────┘   └────────────────────┘
+```
+
 ## Quick Start
 
 Start with the orchestrator path:
@@ -23,7 +52,7 @@ cargo build --release
 
 See [QUICKSTART.md](docs/QUICKSTART.md) for a first-run walkthrough. Use
 [THALA_SETUP.md](docs/THALA_SETUP.md) for the full ops setup: Beads, product
-`WORKFLOW.md`, worker backends, and escalation.
+`WORKFLOW.md`, worker backends, Discord routing, and escalation.
 
 ## Architecture
 

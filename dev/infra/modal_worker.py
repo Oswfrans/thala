@@ -69,7 +69,7 @@ worker_image = (
 #   THALA_TASK_ID=TEST-1 ... modal run dev/infra/modal_worker.py::run_worker
 # The _task_secret below picks them up automatically when present.
 _LOCAL_TASK_VARS = [
-    "THALA_TASK_ID", "THALA_TASK_BRANCH", "THALA_GITHUB_REPO",
+    "THALA_RUN_ID", "THALA_TASK_ID", "THALA_TASK_BRANCH", "THALA_GITHUB_REPO",
     "THALA_CALLBACK_URL", "THALA_RUN_TOKEN", "THALA_MODEL",
     "THALA_PROMPT_B64", "THALA_AFTER_CREATE_HOOK", "THALA_BEFORE_RUN_HOOK",
     "THALA_AFTER_RUN_HOOK", "GITHUB_TOKEN",
@@ -226,10 +226,17 @@ def run_worker() -> int:
     # ── Run OpenCode ──────────────────────────────────────────────────────────
     print(f"[thala-worker] Launching OpenCode (model={model})")
     opencode_result = subprocess.run(
-        ["opencode", "--model", model, "--no-session", "-p", prompt],
+        ["opencode", "run", "--model", model, prompt],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
         env={**os.environ},  # pass through API keys etc.
     )
+    opencode_output = opencode_result.stdout or ""
+    print(opencode_output, end="")
     exit_code = opencode_result.returncode
+    if "ProviderModelNotFoundError" in opencode_output or "Model not found" in opencode_output:
+        exit_code = 1
     print(f"[thala-worker] OpenCode exited with code {exit_code}")
 
     # ── after_run hook ────────────────────────────────────────────────────────

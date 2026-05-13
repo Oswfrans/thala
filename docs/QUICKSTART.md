@@ -72,4 +72,36 @@ OpenCode in tmux with the rendered prompt, wait for `.thala/signals/<task>.signa
 run `after_run`, open a PR, poll CI, and request or perform merge approval based
 on the workflow merge policy.
 
+## 6. Share One Discord App Across Repos
+
+Discord allows one interaction endpoint per application. To run multiple Thala
+services from that same Discord app, keep each repo's Thala process separate and
+put the router in front:
+
+```bash
+# service A
+THALA_CALLBACK_BIND=127.0.0.1:8788 \
+THALA_DISCORD_BIND=127.0.0.1:8789 \
+XDG_DATA_HOME=$HOME/.local/share/thala-main \
+./target/release/thala --workflow /path/to/main/WORKFLOW.md run
+
+# service B
+THALA_CALLBACK_BIND=127.0.0.1:8790 \
+THALA_DISCORD_BIND=127.0.0.1:8791 \
+XDG_DATA_HOME=$HOME/.local/share/thala-chiropro \
+./target/release/thala --workflow /path/to/chiropro/WORKFLOW.md run
+
+# router
+THALA_DISCORD_ROUTER_BIND=127.0.0.1:8792 \
+THALA_ROUTER_MAIN_URL=http://127.0.0.1:8789/api/discord/interaction \
+THALA_ROUTER_CHIROPRO_URL=http://127.0.0.1:8791/api/discord/interaction \
+python3 dev/infra/discord_router.py
+```
+
+Point Discord's interaction URL at your public
+`https://YOUR_DOMAIN/api/discord/interaction` route and proxy that route to the
+router. Route messages by adding an explicit hint such as `chiropro:` in the
+task description. Button interactions route back to the correct service by task
+id prefix, for example `chiropro-...`.
+
 Use [THALA_SETUP.md](THALA_SETUP.md) for backend-specific production notes.

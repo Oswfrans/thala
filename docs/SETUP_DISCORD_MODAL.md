@@ -5,22 +5,24 @@ This guide walks you through setting up Thala with Discord for human interaction
 ## Architecture Overview
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Discord   │────▶│ Thala Server │────▶│    Modal    │
-│  (Intake &  │     │  (Orchestrator)    │  (Workers)  │
-│ Interaction)│◄────│              │◄────│             │
-└─────────────┘     └──────────────┘     └─────────────┘
-                            │
-                            ▼
-                      ┌──────────────┐
-                      │    Beads     │
-                      │ (Task Store) │
-                      └──────────────┘
+┌─────────────┐     ┌────────────────┐     ┌──────────────┐     ┌─────────────┐
+│   Discord   │────▶│ Discord Router │────▶│ Thala Server │────▶│    Modal    │
+│  (single    │     │ optional :8792 │     │ per repo     │     │  Workers    │
+│ interaction │◄────│ signed forward │◄────│              │◄────│             │
+│ endpoint)   │     └────────────────┘     └──────────────┘     └─────────────┘
+└─────────────┘                                     │
+                                                    ▼
+                                             ┌──────────────┐
+                                             │    Beads     │
+                                             │ per repo     │
+                                             └──────────────┘
 ```
 
 **Discord Roles:**
 - **Intake**: Users can create tasks via Discord commands
 - **Interaction**: Approval buttons, retry/escalate decisions, stuck notifications
+- **Routing**: Optional `discord_router.py` lets one Discord app route to multiple
+  Thala services by message hints and task-id prefixes.
 
 **Modal Roles:**
 - Executes workers in serverless containers
@@ -251,6 +253,53 @@ You should see:
 4. Discord messages when task needs approval or gets stuck
 
 ---
+
+## Multi-Service Discord Routing
+
+Use this when one Discord application should control multiple repos at the same
+time. Each repo still gets its own Thala service, ports, `WORKFLOW.md`, Beads
+workspace, and `XDG_DATA_HOME`. The router is only the public Discord ingress.
+
+Example layout:
+
+| Service | Callback bind | Discord bind | State root | Route hint |
+|---|---:|---:|---|---|
+| Main Thala | `127.0.0.1:8788` | `127.0.0.1:8789` | `~/.local/share/thala-main` | default |
+| Chiropro | `127.0.0.1:8790` | `127.0.0.1:8791` | `~/.local/share/thala-chiropro` | `chiropro:` |
+| Router | n/a | `127.0.0.1:8792` | n/a | public ingress |
+
+Start the router:
+
+```bash
+THALA_DISCORD_ROUTER_BIND=127.0.0.1:8792 \
+THALA_ROUTER_MAIN_URL=http://127.0.0.1:8789/api/discord/interaction \
+THALA_ROUTER_CHIROPRO_URL=http://127.0.0.1:8791/api/discord/interaction \
+THALA_ROUTER_CHIROPRO_HINTS="chiropro,chiro pro,makotec-xyz/chiropro" \
+THALA_ROUTER_DEFAULT_TARGET=main \
+python3 dev/infra/discord_router.py
+```
+
+For systemd, copy `dev/infra/thala-discord-router.service` to
+`~/.config/systemd/user/`, edit the URLs/hints, then run:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now thala-discord-router
+```
+
+Proxy Discord's configured interaction URL to the router:
+
+```nginx
+location /api/discord/interaction {
+    proxy_pass http://127.0.0.1:8792/api/discord/interaction;
+    proxy_set_header X-Signature-Ed25519 $http_x_signature_ed25519;
+    proxy_set_header X-Signature-Timestamp $http_x_signature_timestamp;
+}
+```
+
+Keep repo-specific worker callbacks pointed directly at each service, for
+example `https://YOUR_DOMAIN/api/worker/callback` for the main service and
+`https://YOUR_DOMAIN/chiropro/api/worker/callback` for Chiropro.
 
 ## Discord Commands
 

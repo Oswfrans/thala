@@ -165,15 +165,21 @@ impl DiscordInteractionPayload {
 
 #[derive(Debug, Deserialize)]
 struct CommandData {
+    #[serde(default)]
     name: String,
     #[serde(default)]
     options: Vec<CommandOption>,
+    #[serde(default, rename = "custom_id")]
+    custom_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CommandOption {
     name: String,
+    #[serde(default)]
     value: serde_json::Value,
+    #[serde(default)]
+    options: Vec<CommandOption>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -406,6 +412,7 @@ async fn handle_interaction(
         let data = payload.data.unwrap_or(CommandData {
             name: String::new(),
             options: Vec::new(),
+            custom_id: None,
         });
         handle_slash_command(
             state,
@@ -417,12 +424,10 @@ async fn handle_interaction(
         )
     } else if payload.is_message_component() {
         // Type 3: Message Component (button click)
-        // Parse component data from the payload
         let custom_id = payload
             .data
             .as_ref()
-            .and_then(|d| d.options.first())
-            .and_then(|o| o.value.as_str())
+            .and_then(|d| d.custom_id.as_deref())
             .unwrap_or("")
             .to_string();
         let component_data = ComponentData { custom_id };
@@ -471,24 +476,7 @@ fn handle_slash_command(
 
     match data.name.as_str() {
         "thala" | "create" => {
-            // Extract description from options
-            let description = data
-                .options
-                .iter()
-                .find(|o| o.name == "description")
-                .and_then(|o| o.value.as_str())
-                .map_or_else(
-                    || {
-                        // Try to extract from "task" option if present
-                        data.options
-                            .iter()
-                            .find(|o| o.name == "task")
-                            .and_then(|o| o.value.as_str())
-                            .map(std::string::ToString::to_string)
-                            .unwrap_or_default()
-                    },
-                    std::string::ToString::to_string,
-                );
+            let description = extract_create_description(&data.options).unwrap_or_default();
 
             if description.is_empty() {
                 return reply_response(
@@ -532,12 +520,26 @@ fn handle_slash_command(
     }
 }
 
+fn extract_create_description(options: &[CommandOption]) -> Option<String> {
+    options
+        .iter()
+        .find(|o| o.name == "description" || o.name == "task")
+        .and_then(|o| o.value.as_str())
+        .map(std::string::ToString::to_string)
+        .or_else(|| {
+            options
+                .iter()
+                .find(|o| o.name == "create")
+                .and_then(|o| extract_create_description(&o.options))
+        })
+}
+
 /// Handle button clicks (component interactions).
 fn handle_component_interaction(
-    _state: DiscordWebhookState,
+    state: DiscordWebhookState,
     data: ComponentData,
-    _member: Option<serde_json::Value>,
-    _user: Option<serde_json::Value>,
+    member: Option<serde_json::Value>,
+    user: Option<serde_json::Value>,
 ) -> axum::response::Response {
     // Parse custom_id: "thala:{action}:{interaction_id}:{run_id}:{task_id}"
     let parts: Vec<&str> = data.custom_id.split(':').collect();
@@ -546,6 +548,23 @@ fn handle_component_interaction(
     }
 
     let action = parts[1];
+
+    if let Some(interaction) = &state.interaction {
+        let payload = json!({
+            "data": {
+                "custom_id": data.custom_id,
+            },
+            "member": member,
+            "user": user,
+        });
+
+        if let Err(e) = interaction.receive_interaction(&payload) {
+            tracing::warn!("Failed to record Discord component interaction: {e}");
+            return reply_response("Failed to process interaction");
+        }
+    } else {
+        return reply_response("Discord interaction handling is not enabled.");
+    }
 
     // Acknowledge the interaction - type 4
     let response = DiscordResponse::channel_message_with_source(ResponseData {
@@ -636,6 +655,66 @@ fn expand_env_var(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_payload_deserializes_custom_id_without_command_name() {
+        let payload: DiscordInteractionPayload = serde_json::from_value(json!({
+            "type": 3,
+            "data": {
+                "custom_id": "thala:retry:int-1:run-1:task-1"
+            },
+            "member": {
+                "user": {
+                    "id": "user-1"
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(payload.is_message_component());
+        assert_eq!(
+            payload.data.unwrap().custom_id.as_deref(),
+            Some("thala:retry:int-1:run-1:task-1")
+        );
+    }
+
+    #[test]
+    fn extracts_description_from_top_level_option() {
+        let data: CommandData = serde_json::from_value(json!({
+            "name": "thala",
+            "options": [
+                {"name": "description", "value": "Build the thing"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            extract_create_description(&data.options).as_deref(),
+            Some("Build the thing")
+        );
+    }
+
+    #[test]
+    fn extracts_description_from_create_subcommand() {
+        let data: CommandData = serde_json::from_value(json!({
+            "name": "thala",
+            "options": [
+                {
+                    "name": "create",
+                    "options": [
+                        {"name": "description", "value": "Build the nested thing"}
+                    ]
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            extract_create_description(&data.options).as_deref(),
+            Some("Build the nested thing")
+        );
+    }
+
     use ed25519_dalek::{Signer, SigningKey};
 
     #[test]
