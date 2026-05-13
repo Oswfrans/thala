@@ -95,7 +95,7 @@ pub trait ExecutionBackend: Send + Sync {
     fn kind(&self) -> ExecutionBackendKind;
 
     /// Whether this backend creates a local worktree on the Thala host.
-    /// When false, the dispatcher pushes the task branch to origin before spawning.
+    /// When false, the dispatcher pushes a per-run task branch before spawning.
     fn is_local(&self) -> bool;
 
     /// Human-readable name for logs and notifications.
