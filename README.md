@@ -30,11 +30,11 @@ task-id prefixes.
                          │ thala-discord-router :8792   │
                          └───────┬────────────────┬─────┘
                                  │                │
-                    default/thala│                │ chiropro hints or
-                                 │                │ chiropro-* buttons
+                    default/thala│                │ application hints or
+                                 │                │ application-* buttons
                                  ▼                ▼
                     ┌────────────────┐   ┌────────────────────┐
-                    │ Thala :8789    │   │ Chiropro :8791     │
+                    │ Thala :8789    │   │ application :8791  │
                     │ callbacks:8788 │   │ callbacks:8790     │
                     └────────────────┘   └────────────────────┘
 ```
