@@ -130,7 +130,18 @@ impl ValidatorCoordinator {
         }
 
         // Step 1: Review AI.
-        let review_outcome = self.review_ai.validate(&run, &record.spec).await?;
+        let review_outcome = match self.review_ai.validate(&run, &record.spec).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                return self
+                    .handle_validation_infrastructure_failure(
+                        &run,
+                        &mut record,
+                        format!("Review AI validation failed: {e}"),
+                    )
+                    .await;
+            }
+        };
 
         let _ = self
             .events_tx
@@ -163,12 +174,33 @@ impl ValidatorCoordinator {
         if let Some(worktree_path) = run.worktree_path.as_deref() {
             let github_token =
                 std::env::var(&self.workflow.execution.github_token_env).unwrap_or_default();
-            self.repo
+            if let Err(e) = self
+                .repo
                 .push_branch(std::path::Path::new(worktree_path), &branch, &github_token)
-                .await?;
+                .await
+            {
+                return self
+                    .handle_validation_infrastructure_failure(
+                        &run,
+                        &mut record,
+                        format!("Branch push failed: {e}"),
+                    )
+                    .await;
+            }
         }
 
-        let (pr_number, pr_url) = self.repo.create_pr(&branch, &pr_title, &pr_body).await?;
+        let (pr_number, pr_url) = match self.repo.create_pr(&branch, &pr_title, &pr_body).await {
+            Ok(pr) => pr,
+            Err(e) => {
+                return self
+                    .handle_validation_infrastructure_failure(
+                        &run,
+                        &mut record,
+                        format!("PR creation failed: {e}"),
+                    )
+                    .await;
+            }
+        };
 
         // Update run with PR info.
         let mut updated_run = run.clone();
@@ -366,6 +398,51 @@ impl ValidatorCoordinator {
         Ok(())
     }
 
+    async fn handle_validation_infrastructure_failure(
+        &self,
+        run: &TaskRun,
+        record: &mut crate::core::task::TaskRecord,
+        reason: String,
+    ) -> anyhow::Result<()> {
+        tracing::warn!(
+            task_id = %record.spec.id,
+            attempt = record.attempt,
+            max_attempts = self.workflow.retry.max_attempts,
+            "Validation infrastructure failure: {reason}"
+        );
+
+        if record.attempt < self.workflow.retry.max_attempts {
+            let mut updated_run = run.clone();
+            updated_run.review_feedback = Some(reason.clone());
+            self.store.upsert_run(&updated_run).await?;
+
+            *record = apply_transition(record, Transition::ValidationFailedRetry { reason })?;
+            self.store.upsert_task(record).await?;
+
+            let _ = self
+                .events_tx
+                .send(OrchestratorEvent::dispatch_ready(record.spec.id.clone()))
+                .await;
+        } else {
+            *record = apply_transition(
+                record,
+                Transition::ValidationFailedTerminal {
+                    reason: reason.clone(),
+                },
+            )?;
+            self.store.upsert_task(record).await?;
+
+            if let Err(e) = self.sink.mark_stuck(record.spec.id.as_str(), &reason).await {
+                tracing::warn!(
+                    task_id = %record.spec.id,
+                    "Failed to mark task stuck in Beads after validation infrastructure failure: {e}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     async fn request_approval(
         &self,
         task_id: &TaskId,
@@ -538,9 +615,10 @@ fn diff_touches_protected_path(diff: &str, patterns: &[String]) -> bool {
 #[cfg(test)]
 mod validation_flow_tests {
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use tempfile::TempDir;
 
     use super::ValidatorCoordinator;
     use crate::adapters::state::SqliteStateStore;
@@ -576,6 +654,44 @@ mod validation_flow_tests {
                 ValidatorKind::ReviewAi,
                 "Review AI rejected the diff",
                 "needs fix",
+            ))
+        }
+    }
+
+    struct ErrorValidator;
+
+    #[async_trait]
+    impl Validator for ErrorValidator {
+        fn kind(&self) -> ValidatorKind {
+            ValidatorKind::ReviewAi
+        }
+
+        async fn validate(
+            &self,
+            _run: &TaskRun,
+            _spec: &TaskSpec,
+        ) -> Result<ValidationOutcome, ThalaError> {
+            Err(ThalaError::Validation("review service unavailable".into()))
+        }
+    }
+
+    struct PassingValidator;
+
+    #[async_trait]
+    impl Validator for PassingValidator {
+        fn kind(&self) -> ValidatorKind {
+            ValidatorKind::ReviewAi
+        }
+
+        async fn validate(
+            &self,
+            run: &TaskRun,
+            _spec: &TaskSpec,
+        ) -> Result<ValidationOutcome, ThalaError> {
+            Ok(ValidationOutcome::pass(
+                run.run_id.clone(),
+                ValidatorKind::ReviewAi,
+                "passed",
             ))
         }
     }
@@ -633,6 +749,112 @@ mod validation_flow_tests {
         }
     }
 
+    struct PushFailingRepo;
+
+    #[async_trait]
+    impl RepoProvider for PushFailingRepo {
+        async fn create_worktree(
+            &self,
+            _workspace_root: &Path,
+            _branch: &str,
+            _base_branch: &str,
+            _task_id: &str,
+        ) -> Result<PathBuf, ThalaError> {
+            unreachable!("validation should not create worktrees")
+        }
+
+        async fn remove_worktree(&self, _worktree_path: &Path) -> Result<(), ThalaError> {
+            unreachable!("validation should not remove worktrees")
+        }
+
+        async fn push_branch(
+            &self,
+            _workspace_root: &Path,
+            _branch: &str,
+            _github_token: &str,
+        ) -> Result<(), ThalaError> {
+            Err(ThalaError::repo("git push rejected"))
+        }
+
+        async fn get_diff(&self, _worktree_path: &Path) -> Result<String, ThalaError> {
+            unreachable!("push failure should not fetch repo diffs")
+        }
+
+        async fn create_pr(
+            &self,
+            _branch: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<(u32, String), ThalaError> {
+            unreachable!("push failure should not create PRs")
+        }
+
+        async fn pr_is_merged(&self, _pr_number: u32) -> Result<bool, ThalaError> {
+            unreachable!("push failure should not poll PRs")
+        }
+
+        async fn pr_ci_status(&self, _pr_number: u32) -> Result<CiStatus, ThalaError> {
+            unreachable!("push failure should not poll CI")
+        }
+
+        async fn merge_pr(&self, _pr_number: u32) -> Result<(), ThalaError> {
+            unreachable!("push failure should not merge PRs")
+        }
+    }
+
+    struct PrFailingRepo;
+
+    #[async_trait]
+    impl RepoProvider for PrFailingRepo {
+        async fn create_worktree(
+            &self,
+            _workspace_root: &Path,
+            _branch: &str,
+            _base_branch: &str,
+            _task_id: &str,
+        ) -> Result<PathBuf, ThalaError> {
+            unreachable!("validation should not create worktrees")
+        }
+
+        async fn remove_worktree(&self, _worktree_path: &Path) -> Result<(), ThalaError> {
+            unreachable!("validation should not remove worktrees")
+        }
+
+        async fn push_branch(
+            &self,
+            _workspace_root: &Path,
+            _branch: &str,
+            _github_token: &str,
+        ) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn get_diff(&self, _worktree_path: &Path) -> Result<String, ThalaError> {
+            unreachable!("PR creation failure should not fetch repo diffs")
+        }
+
+        async fn create_pr(
+            &self,
+            _branch: &str,
+            _title: &str,
+            _body: &str,
+        ) -> Result<(u32, String), ThalaError> {
+            Err(ThalaError::repo("gh pr create failed"))
+        }
+
+        async fn pr_is_merged(&self, _pr_number: u32) -> Result<bool, ThalaError> {
+            unreachable!("PR creation failure should not poll PRs")
+        }
+
+        async fn pr_ci_status(&self, _pr_number: u32) -> Result<CiStatus, ThalaError> {
+            unreachable!("PR creation failure should not poll CI")
+        }
+
+        async fn merge_pr(&self, _pr_number: u32) -> Result<(), ThalaError> {
+            unreachable!("PR creation failure should not merge PRs")
+        }
+    }
+
     struct NoopSink;
 
     #[async_trait]
@@ -654,6 +876,39 @@ mod validation_flow_tests {
         }
 
         async fn mark_stuck(&self, _task_id: &str, _reason: &str) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn reopen(&self, _task_id: &str) -> Result<(), ThalaError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        stuck_reasons: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TaskSink for RecordingSink {
+        async fn create_task(&self, _spec: NewTaskRequest) -> Result<String, ThalaError> {
+            Ok("bd-created".into())
+        }
+
+        async fn append_context(&self, _task_id: &str, _context: &str) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn mark_in_progress(&self, _task_id: &str) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn mark_done(&self, _task_id: &str, _pr_number: u32) -> Result<(), ThalaError> {
+            Ok(())
+        }
+
+        async fn mark_stuck(&self, _task_id: &str, reason: &str) -> Result<(), ThalaError> {
+            self.stuck_reasons.lock().unwrap().push(reason.to_string());
             Ok(())
         }
 
@@ -685,35 +940,47 @@ github_repo: "org/repo"
         }
     }
 
-    #[tokio::test]
-    async fn review_failure_moves_completed_run_to_retry_dispatching() {
+    async fn store_completed_run(
+        task_id: &TaskId,
+        run_id: &RunId,
+        attempt: u32,
+        worktree_path: Option<String>,
+    ) -> (TempDir, Arc<SqliteStateStore>) {
         let tmp = tempfile::tempdir().unwrap();
         let store = Arc::new(SqliteStateStore::open(tmp.path().join("state.db")).unwrap());
-        let task_id = TaskId::new("bd-review-retry");
-        let run_id = RunId::new_v4();
 
         let record = TaskRecord::new(make_spec(task_id.as_str()));
         let record = apply_transition(&record, Transition::MarkReady).unwrap();
         let record = apply_transition(&record, Transition::BeginDispatching).unwrap();
-        let record = apply_transition(
+        let mut record = apply_transition(
             &record,
             Transition::RunLaunched {
                 run_id: run_id.clone(),
             },
         )
         .unwrap();
+        record.attempt = attempt;
 
         let run = TaskRun::new(
             run_id.clone(),
             task_id.clone(),
-            1,
+            attempt,
             ExecutionBackendKind::Local,
         );
         let run = apply_run_transition(&run, RunTransition::Activated).unwrap();
-        let run = apply_run_transition(&run, RunTransition::CompletionSignaled).unwrap();
+        let mut run = apply_run_transition(&run, RunTransition::CompletionSignaled).unwrap();
+        run.worktree_path = worktree_path;
 
         store.upsert_task(&record).await.unwrap();
         store.upsert_run(&run).await.unwrap();
+        (tmp, store)
+    }
+
+    #[tokio::test]
+    async fn review_failure_moves_completed_run_to_retry_dispatching() {
+        let task_id = TaskId::new("bd-review-retry");
+        let run_id = RunId::new_v4();
+        let (_tmp, store) = store_completed_run(&task_id, &run_id, 1, None).await;
 
         let (events_tx, _events_rx) = tokio::sync::mpsc::channel(8);
         let coordinator = ValidatorCoordinator::new(
@@ -737,6 +1004,147 @@ github_repo: "org/repo"
         let updated_run = store.get_run(&run_id).await.unwrap().unwrap();
         assert_eq!(updated_run.review_cycle, 1);
         assert_eq!(updated_run.review_feedback.as_deref(), Some("needs fix"));
+    }
+
+    #[tokio::test]
+    async fn review_infrastructure_error_moves_task_to_retry_dispatching() {
+        let task_id = TaskId::new("bd-review-infra-retry");
+        let run_id = RunId::new_v4();
+        let (_tmp, store) = store_completed_run(&task_id, &run_id, 1, None).await;
+
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator = ValidatorCoordinator::new(
+            workflow(),
+            Arc::new(ErrorValidator),
+            Arc::new(UnusedRepo),
+            store.clone(),
+            Arc::new(NoopSink),
+            vec![],
+            events_tx,
+        );
+
+        coordinator
+            .handle_run_completed(&task_id, &run_id)
+            .await
+            .unwrap();
+
+        let updated = store.get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Dispatching);
+
+        let updated_run = store.get_run(&run_id).await.unwrap().unwrap();
+        assert!(updated_run
+            .review_feedback
+            .as_deref()
+            .unwrap_or_default()
+            .contains("review service unavailable"));
+
+        match events_rx.try_recv().unwrap() {
+            crate::core::events::OrchestratorEvent::DispatchReady { task_id: id, .. } => {
+                assert_eq!(id, task_id);
+            }
+            event => panic!("expected DispatchReady, got {event:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn push_failure_moves_task_to_retry_dispatching() {
+        let task_id = TaskId::new("bd-push-infra-retry");
+        let run_id = RunId::new_v4();
+        let (_tmp, store) =
+            store_completed_run(&task_id, &run_id, 1, Some("/tmp/worktree".into())).await;
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator = ValidatorCoordinator::new(
+            workflow(),
+            Arc::new(PassingValidator),
+            Arc::new(PushFailingRepo),
+            store.clone(),
+            Arc::new(NoopSink),
+            vec![],
+            events_tx,
+        );
+
+        coordinator
+            .handle_run_completed(&task_id, &run_id)
+            .await
+            .unwrap();
+
+        let updated = store.get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Dispatching);
+
+        let updated_run = store.get_run(&run_id).await.unwrap().unwrap();
+        assert!(updated_run
+            .review_feedback
+            .as_deref()
+            .unwrap_or_default()
+            .contains("git push rejected"));
+    }
+
+    #[tokio::test]
+    async fn pr_creation_failure_moves_task_to_retry_dispatching() {
+        let task_id = TaskId::new("bd-pr-infra-retry");
+        let run_id = RunId::new_v4();
+        let (_tmp, store) =
+            store_completed_run(&task_id, &run_id, 1, Some("/tmp/worktree".into())).await;
+
+        let (events_tx, _events_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator = ValidatorCoordinator::new(
+            workflow(),
+            Arc::new(PassingValidator),
+            Arc::new(PrFailingRepo),
+            store.clone(),
+            Arc::new(NoopSink),
+            vec![],
+            events_tx,
+        );
+
+        coordinator
+            .handle_run_completed(&task_id, &run_id)
+            .await
+            .unwrap();
+
+        let updated = store.get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Dispatching);
+
+        let updated_run = store.get_run(&run_id).await.unwrap().unwrap();
+        assert!(updated_run
+            .review_feedback
+            .as_deref()
+            .unwrap_or_default()
+            .contains("gh pr create failed"));
+    }
+
+    #[tokio::test]
+    async fn review_infrastructure_error_at_max_attempts_marks_failed_and_stuck() {
+        let task_id = TaskId::new("bd-review-infra-terminal");
+        let run_id = RunId::new_v4();
+        let (_tmp, store) = store_completed_run(&task_id, &run_id, 3, None).await;
+        let sink = Arc::new(RecordingSink::default());
+
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
+        let coordinator = ValidatorCoordinator::new(
+            workflow(),
+            Arc::new(ErrorValidator),
+            Arc::new(UnusedRepo),
+            store.clone(),
+            sink.clone(),
+            vec![],
+            events_tx,
+        );
+
+        coordinator
+            .handle_run_completed(&task_id, &run_id)
+            .await
+            .unwrap();
+
+        let updated = store.get_task(&task_id).await.unwrap().unwrap();
+        assert_eq!(updated.status, TaskStatus::Failed);
+        assert_eq!(updated.active_run_id, None);
+        assert!(events_rx.try_recv().is_err());
+
+        let stuck_reasons = sink.stuck_reasons.lock().unwrap();
+        assert_eq!(stuck_reasons.len(), 1);
+        assert!(stuck_reasons[0].contains("review service unavailable"));
     }
 }
 
