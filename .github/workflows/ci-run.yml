@@ -121,9 +121,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     needs: [change-scope, lint]
-    if: |
-      needs.change-scope.outputs.docs_only != 'true' &&
-      (github.event_name == 'push' || matrix.target == 'x86_64-unknown-linux-gnu')
+    if: needs.change-scope.outputs.docs_only != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -136,11 +134,14 @@ jobs:
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        if: github.event_name == 'push' || matrix.target == 'x86_64-unknown-linux-gnu'
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        if: github.event_name == 'push' || matrix.target == 'x86_64-unknown-linux-gnu'
         with:
           toolchain: 1.92.0
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        if: github.event_name == 'push' || matrix.target == 'x86_64-unknown-linux-gnu'
 
       - name: Install mold linker
         if: runner.os == 'Linux'
@@ -149,9 +150,11 @@ jobs:
           sudo apt-get install -y mold
 
       - name: Ensure web/dist placeholder exists
+        if: github.event_name == 'push' || matrix.target == 'x86_64-unknown-linux-gnu'
         run: mkdir -p web/dist && touch web/dist/.gitkeep
 
       - name: Build release
+        if: github.event_name == 'push' || matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo build --profile ci --locked --target ${{ matrix.target }}
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
