@@ -1,11 +1,12 @@
 //! LocalBackend — tmux sessions + git worktrees on the Thala host.
 //!
 //! How it works:
-//!   1. `launch()` creates a git worktree, writes a prompt file, runs before_run hook,
-//!      then spawns an opencode session in a new tmux window.
+//!   1. `launch()` creates a git worktree, writes a prompt file, runs
+//!      after_create and before_run hooks, then spawns an opencode session in a
+//!      new tmux window.
 //!   2. `observe()` runs `tmux capture-pane` and hashes the output for stall detection.
 //!   3. `cancel()` kills the tmux session.
-//!   4. `cleanup()` kills the session, removes the worktree, runs before_cleanup hook.
+//!   4. `cleanup()` kills the session and removes the worktree.
 //!
 //! Runtime state that must be persisted (stored in TaskRun):
 //!   - job_handle.job_id: tmux session name (e.g. "thala-example-app-bd-a1b2")

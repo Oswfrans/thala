@@ -16,6 +16,10 @@ The function:
 5. Commits and pushes changes back to the task branch
 6. POSTs an authenticated completion callback to Thala
 
+Lifecycle hooks are trusted WORKFLOW.md shell snippets owned by the workflow
+operator. They intentionally run through the shell for normal shell semantics;
+if any hook exits non-zero, the Modal worker reports an error callback and stops.
+
 Required env vars (passed via --env or set in Modal secrets):
     THALA_RUN_ID           Thala run ID
     THALA_TASK_ID          task ID (e.g. "MKT-42")
@@ -139,6 +143,21 @@ def _commit_and_push(task_id: str, task_branch: str) -> str | None:
     return sha.stdout.decode().strip()
 
 
+def _run_workflow_hook(hook_name: str, hook: str) -> int:
+    """Run a trusted WORKFLOW.md lifecycle hook as a shell snippet."""
+    if not hook:
+        return 0
+
+    print(f"[thala-worker] Running {hook_name} hook: {hook}")
+    result = subprocess.run(hook, shell=True)  # noqa: S602
+    if result.returncode != 0:
+        print(
+            f"ERROR: {hook_name} hook failed with code {result.returncode}",
+            file=sys.stderr,
+        )
+    return result.returncode
+
+
 @app.function(
     timeout=int(os.environ.get("THALA_WORKER_TIMEOUT_SECS", "3600")),
     secrets=[_task_secret],
@@ -210,18 +229,32 @@ def run_worker() -> int:
         prompt = prompt_path.read_text()
 
     # ── after_create hook ─────────────────────────────────────────────────────
-    if after_create_hook:
-        print(f"[thala-worker] Running after_create hook: {after_create_hook}")
-        result = subprocess.run(after_create_hook, shell=True)  # noqa: S602
-        if result.returncode != 0:
-            print("WARNING: after_create hook failed (continuing)", file=sys.stderr)
+    exit_code = _run_workflow_hook("after_create", after_create_hook)
+    if exit_code != 0:
+        _send_callback(
+            callback_url,
+            run_token,
+            run_id,
+            task_id,
+            "error",
+            exit_code,
+            f"after_create hook failed with code {exit_code}",
+        )
+        return exit_code
 
     # ── before_run hook ───────────────────────────────────────────────────────
-    if before_run_hook:
-        print(f"[thala-worker] Running before_run hook: {before_run_hook}")
-        result = subprocess.run(before_run_hook, shell=True)  # noqa: S602
-        if result.returncode != 0:
-            print("WARNING: before_run hook failed (continuing)", file=sys.stderr)
+    exit_code = _run_workflow_hook("before_run", before_run_hook)
+    if exit_code != 0:
+        _send_callback(
+            callback_url,
+            run_token,
+            run_id,
+            task_id,
+            "error",
+            exit_code,
+            f"before_run hook failed with code {exit_code}",
+        )
+        return exit_code
 
     # ── Run OpenCode ──────────────────────────────────────────────────────────
     print(f"[thala-worker] Launching OpenCode (model={model})")
@@ -239,27 +272,7 @@ def run_worker() -> int:
         exit_code = 1
     print(f"[thala-worker] OpenCode exited with code {exit_code}")
 
-    # ── after_run hook ────────────────────────────────────────────────────────
-    if after_run_hook:
-        print(f"[thala-worker] Running after_run hook: {after_run_hook}")
-        result = subprocess.run(after_run_hook, shell=True)  # noqa: S602
-        if result.returncode != 0:
-            print("WARNING: after_run hook failed (continuing)", file=sys.stderr)
-
-    # ── Commit, push, and notify Thala ────────────────────────────────────────
-    if exit_code == 0:
-        try:
-            commit_sha = _commit_and_push(task_id, task_branch)
-            if commit_sha:
-                print(f"[thala-worker] Pushed commit {commit_sha} to {task_branch}")
-        except subprocess.CalledProcessError as exc:
-            msg = f"commit/push failed with code {exc.returncode}"
-            print(f"ERROR: {msg}", file=sys.stderr)
-            _send_callback(callback_url, run_token, run_id, task_id, "error", exc.returncode, msg)
-            return exc.returncode or 1
-
-        _send_callback(callback_url, run_token, run_id, task_id, "success", 0, None)
-    else:
+    if exit_code != 0:
         _send_callback(
             callback_url,
             run_token,
@@ -269,6 +282,34 @@ def run_worker() -> int:
             exit_code,
             f"OpenCode exited with code {exit_code}",
         )
+        return exit_code
+
+    # ── after_run hook ────────────────────────────────────────────────────────
+    hook_exit_code = _run_workflow_hook("after_run", after_run_hook)
+    if hook_exit_code != 0:
+        _send_callback(
+            callback_url,
+            run_token,
+            run_id,
+            task_id,
+            "error",
+            hook_exit_code,
+            f"after_run hook failed with code {hook_exit_code}",
+        )
+        return hook_exit_code
+
+    # ── Commit, push, and notify Thala ────────────────────────────────────────
+    try:
+        commit_sha = _commit_and_push(task_id, task_branch)
+        if commit_sha:
+            print(f"[thala-worker] Pushed commit {commit_sha} to {task_branch}")
+    except subprocess.CalledProcessError as exc:
+        msg = f"commit/push failed with code {exc.returncode}"
+        print(f"ERROR: {msg}", file=sys.stderr)
+        _send_callback(callback_url, run_token, run_id, task_id, "error", exc.returncode, msg)
+        return exc.returncode or 1
+
+    _send_callback(callback_url, run_token, run_id, task_id, "success", 0, None)
 
     return exit_code
 

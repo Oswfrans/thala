@@ -165,6 +165,11 @@ attempt it:
 8. Commits changed files and pushes back to the task branch.
 9. Records the final commit SHA, or records that there were no changes.
 
+Lifecycle hooks are trusted shell snippets from `WORKFLOW.md`. They are
+operator-owned configuration and must not be populated from Beads task text or
+chat input. The Cloudflare executor runs them through `bash -lc` for normal
+shell semantics; a non-zero hook exit fails the sandbox task.
+
 Secrets are not stored in Durable Object state or returned in API responses.
 Worker secrets are passed only as per-command environment variables to the
 sandbox and log output is redacted before it is appended to task logs.

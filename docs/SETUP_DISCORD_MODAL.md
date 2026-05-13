@@ -182,6 +182,12 @@ You are an expert developer working on {{ product_name }}.
 Write DONE to `.thala/signals/{{ issue.identifier }}.signal` when complete.
 ```
 
+Lifecycle hooks are trusted shell snippets from `WORKFLOW.md`. They are
+operator-owned configuration, not Discord/Beads task input. The Modal worker
+executes them through the shell for normal shell semantics; a non-zero hook
+exit sends an error callback and stops the run. `before_cleanup` is accepted in
+workflow files for compatibility but is not executed by the Modal worker.
+
 ### Step 3: Configure Environment Variables
 
 Add these to your systemd service or shell environment:

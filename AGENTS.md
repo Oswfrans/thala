@@ -482,6 +482,7 @@ Enforced in the validator: if `task.product == "thala-core"` and the task reache
 
 - Never log or return secrets, tokens, or API keys
 - All `std::process::Command` calls must use argument arrays — never `sh -c "... {user_input}"`
+- Lifecycle hooks from `WORKFLOW.md` are the narrow exception: they are trusted workflow-owner shell snippets, not task/user input. Local, Modal, and Cloudflare backends execute them through the shell for normal shell semantics, and a non-zero hook exit fails the run.
 - Callback tokens: UUID per `TaskRun`; only the SHA-256 hash stored; raw token sent only to the worker
 - Discord signature verification: Ed25519 public key validation on all webhook payloads
 - `THALA_GITHUB_TOKEN` and all other secrets come from env vars only
@@ -575,7 +576,7 @@ Branch/commit/PR rules:
 - Do not introduce async runtimes beyond what tokio already provides
 - Do not create God structs — keep each file single-purpose
 - Do not auto-merge `thala-core` PRs under any circumstances
-- Do not use `sh -c` with interpolated values — always use argument arrays
+- Do not use `sh -c` with interpolated values — always use argument arrays, except for trusted `WORKFLOW.md` lifecycle hooks as described in the security rules
 - Do not silently swallow template rendering errors — fail the dispatch for that task
 - Do not hardcode model names or API provider names in Rust source
 - Do not add heavy dependencies for minor convenience

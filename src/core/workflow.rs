@@ -44,7 +44,12 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub stuck: StuckPolicy,
 
-    /// Lifecycle hooks (shell commands run at key points).
+    /// Lifecycle hooks run at key points in the worker lifecycle.
+    ///
+    /// Hooks are trusted workflow-owner shell snippets from WORKFLOW.md, not
+    /// task/user input. Backends intentionally execute them through a shell so
+    /// operators can use normal shell composition. A non-zero hook exit fails
+    /// the launch/run phase that invoked it.
     #[serde(default)]
     pub hooks: HooksConfig,
 
@@ -318,8 +323,11 @@ pub struct StuckPolicy {
     pub auto_resolve_after_ms: u64,
 }
 
-/// Shell commands executed at lifecycle points.
-/// All commands are run in the workspace root.
+/// Trusted shell snippets executed at lifecycle points.
+///
+/// Hooks are sourced only from WORKFLOW.md and are treated as operator-owned
+/// configuration. They are intentionally evaluated by a shell across backends,
+/// so they must not be populated from Beads task text or chat input.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HooksConfig {
     /// Run after the worktree/clone is ready, before the worker starts (e.g. npm install).
@@ -334,7 +342,8 @@ pub struct HooksConfig {
     #[serde(default)]
     pub after_run: Option<String>,
 
-    /// Run before the worktree is deleted.
+    /// Reserved for future local cleanup support. Current backends do not
+    /// execute this hook.
     #[serde(default)]
     pub before_cleanup: Option<String>,
 }
