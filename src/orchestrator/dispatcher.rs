@@ -5,7 +5,7 @@
 //!   2. Creates or updates the TaskRecord.
 //!   3. Routes to an execution backend via BackendRouter.
 //!   4. Builds the LaunchRequest (prompt, model, workspace).
-//!   5. For remote backends: pushes the task branch to origin first.
+//!   5. For remote backends: pushes a per-run task branch to origin first.
 //!   6. Launches the run via ExecutionBackend.
 //!   7. Persists the TaskRun and updated TaskRecord.
 //!   8. Writes "in_progress" back to Beads via TaskSink.
@@ -158,11 +158,13 @@ impl Dispatcher {
             Some(token)
         };
 
-        // For remote backends: push a task branch to origin before spawning.
+        // For remote backends: push a per-run task branch to origin before
+        // spawning. Retries must not reuse `task/<id>` because the remote
+        // worker pushes its output there, leaving the local ref stale.
         let remote_branch = if backend.is_local() {
             None
         } else {
-            let branch = format!("task/{}", task_id.as_str());
+            let branch = remote_run_branch(&task_id, next_attempt, &run_id);
             let github_token =
                 std::env::var(&self.workflow.execution.github_token_env).unwrap_or_default();
 
@@ -365,4 +367,38 @@ impl Dispatcher {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+fn remote_run_branch(task_id: &TaskId, attempt: u32, run_id: &RunId) -> String {
+    format!(
+        "task/{}-attempt-{}-{}",
+        task_id.as_str(),
+        attempt,
+        run_id.as_str()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_run_branch_is_unique_per_attempt_and_run() {
+        let task_id = TaskId::new("bd-123");
+        let run_id_1 = RunId::from("11111111-1111-4111-8111-111111111111");
+        let run_id_2 = RunId::from("22222222-2222-4222-8222-222222222222");
+
+        assert_eq!(
+            remote_run_branch(&task_id, 1, &run_id_1),
+            "task/bd-123-attempt-1-11111111-1111-4111-8111-111111111111"
+        );
+        assert_ne!(
+            remote_run_branch(&task_id, 1, &run_id_1),
+            remote_run_branch(&task_id, 1, &run_id_2)
+        );
+        assert_ne!(
+            remote_run_branch(&task_id, 1, &run_id_1),
+            remote_run_branch(&task_id, 2, &run_id_1)
+        );
+    }
 }

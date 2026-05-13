@@ -152,7 +152,7 @@ pub struct TaskRun {
     pub handle: Option<WorkerHandle>,
     /// Absolute path to the local git worktree (Local backend only).
     pub worktree_path: Option<String>,
-    /// Branch name pushed to origin (remote backends only).
+    /// Per-run branch name pushed to origin (remote backends only).
     pub remote_branch: Option<String>,
     /// SHA-256 of the per-run callback bearer token (raw token is sent to worker only).
     pub callback_token_hash: Option<String>,
