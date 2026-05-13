@@ -6,7 +6,7 @@
 
 This is an alpha version that I made because I found it interesting. Use at your own peril and discretion for now. Short pitch: Claude managed agents, but opensource.
 
-Thala is an opinionated open-source agent development framework for turning Beads tasks into reviewed code changes. It assembles context-rich prompts, spawns OpenCode workers in isolated tmux/git worktrees or remote containers such as OpenCode Zen, Modal, or Cloudflare, monitors those sessions, and handles validation, retries, and human escalation - all driven by a per-product `WORKFLOW.md` config file.
+Thala is an opinionated open-source agent development framework for turning Beads tasks into reviewed code changes. It assembles context-rich prompts, spawns OpenCode workers in isolated tmux/git worktrees or remote containers such as Modal, or Cloudflare, monitors those sessions, and handles validation, retries, and human escalation - all driven by a per-product `WORKFLOW.md` config file.
 
 Model routing is config-driven via `WORKFLOW.md`. Beads is the supported tracker.
 
