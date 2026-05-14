@@ -1,11 +1,12 @@
 //! LocalBackend — tmux sessions + git worktrees on the Thala host.
 //!
 //! How it works:
-//!   1. `launch()` creates a git worktree, writes a prompt file, runs before_run hook,
-//!      then spawns an opencode session in a new tmux window.
+//!   1. `launch()` creates a git worktree, writes a prompt file, runs
+//!      after_create and before_run hooks, then spawns an opencode session in a
+//!      new tmux window.
 //!   2. `observe()` runs `tmux capture-pane` and hashes the output for stall detection.
 //!   3. `cancel()` kills the tmux session.
-//!   4. `cleanup()` kills the session, removes the worktree, runs before_cleanup hook.
+//!   4. `cleanup()` kills the session and removes the worktree.
 //!
 //! Runtime state that must be persisted (stored in TaskRun):
 //!   - job_handle.job_id: tmux session name (e.g. "thala-example-app-bd-a1b2")
@@ -43,6 +44,15 @@ impl LocalBackend {
     fn worktree_path(workspace_root: &Path, task_id: &str) -> PathBuf {
         let slug = task_id.replace(['/', ':'], "-");
         workspace_root.join(format!(".thala-worktrees/{slug}"))
+    }
+
+    fn path_arg<'a>(path: &'a Path, label: &str) -> Result<&'a str, ThalaError> {
+        path.to_str().ok_or_else(|| {
+            ThalaError::backend(
+                "local",
+                format!("{label} path is not valid UTF-8: {}", path.display()),
+            )
+        })
     }
 
     async fn run_hook(
@@ -93,18 +103,12 @@ impl ExecutionBackend for LocalBackend {
     async fn launch(&self, req: LaunchRequest) -> Result<LaunchedRun, ThalaError> {
         let session = Self::session_name(&req.task_id, &req.product);
         let worktree = Self::worktree_path(&req.workspace_root, &req.task_id);
+        let worktree_arg = Self::path_arg(&worktree, "worktree")?;
 
         // Create git worktree.
         let branch = format!("task/{}", req.task_id);
         let output = tokio::process::Command::new("git")
-            .args([
-                "worktree",
-                "add",
-                "-b",
-                &branch,
-                worktree.to_str().unwrap_or("."),
-                "HEAD",
-            ])
+            .args(["worktree", "add", "-b", &branch, worktree_arg, "HEAD"])
             .current_dir(&req.workspace_root)
             .output()
             .await
@@ -152,7 +156,7 @@ impl ExecutionBackend for LocalBackend {
                 "-s",
                 &session,
                 "-c",
-                worktree.to_str().unwrap_or("."),
+                worktree_arg,
                 "opencode",
                 "--model",
                 &req.model,
@@ -251,13 +255,9 @@ impl ExecutionBackend for LocalBackend {
         // Remove worktree.
         let worktree = Self::worktree_path(workspace_root, task_id);
         if worktree.exists() {
+            let worktree_arg = Self::path_arg(&worktree, "worktree")?;
             let _ = tokio::process::Command::new("git")
-                .args([
-                    "worktree",
-                    "remove",
-                    "--force",
-                    worktree.to_str().unwrap_or("."),
-                ])
+                .args(["worktree", "remove", "--force", worktree_arg])
                 .current_dir(workspace_root)
                 .status()
                 .await;
@@ -265,5 +265,23 @@ impl ExecutionBackend for LocalBackend {
 
         tracing::info!(task_id, "Local backend cleanup complete");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LocalBackend;
+
+    #[cfg(unix)]
+    #[test]
+    fn path_arg_rejects_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(OsString::from_vec(vec![0xff]));
+        let err = LocalBackend::path_arg(&path, "worktree").unwrap_err();
+
+        assert!(err.to_string().contains("worktree path is not valid UTF-8"));
     }
 }

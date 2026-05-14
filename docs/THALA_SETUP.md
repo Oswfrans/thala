@@ -123,6 +123,13 @@ You are an expert developer working on **{{ product_name }}**.
 When complete, write `DONE` to `.thala/signals/{{ issue.identifier }}.signal`.
 ```
 
+Lifecycle hooks are trusted shell snippets from `WORKFLOW.md`. They are
+operator-owned configuration, not Beads task text or chat input. Local, Modal,
+and Cloudflare workers intentionally execute `after_create`, `before_run`, and
+`after_run` through a shell so normal shell composition works; a non-zero hook
+exit fails that launch or run phase. `before_cleanup` is accepted in workflow
+files for compatibility but is not executed by the current backends.
+
 ## Remote backends
 
 `opencode-zen`, `modal`, and `cloudflare` are configured through the same

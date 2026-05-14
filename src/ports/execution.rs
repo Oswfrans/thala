@@ -58,13 +58,16 @@ pub struct LaunchRequest {
     pub github_token: Option<String>,
 
     // ── Lifecycle hooks forwarded to remote workers ───────────────────────────
-    /// Shell command run after the worktree/clone is ready, before OpenCode starts.
+    /// Trusted WORKFLOW.md shell snippet run after the worktree/clone is ready,
+    /// before OpenCode starts. Non-zero exits fail the run.
     pub after_create_hook: Option<String>,
 
-    /// Shell command run in the worktree before OpenCode starts.
+    /// Trusted WORKFLOW.md shell snippet run in the worktree before OpenCode
+    /// starts. Non-zero exits fail the run.
     pub before_run_hook: Option<String>,
 
-    /// Shell command run after OpenCode exits, before the callback is sent.
+    /// Trusted WORKFLOW.md shell snippet run after OpenCode exits, before the
+    /// callback is sent. Non-zero exits fail the run.
     pub after_run_hook: Option<String>,
 }
 
@@ -125,8 +128,7 @@ pub trait ExecutionBackend: Send + Sync {
     /// Forcefully terminate a worker.
     async fn cancel(&self, handle: &WorkerHandle) -> Result<(), ThalaError>;
 
-    /// Full cleanup: terminate if still running, remove local worktree (if any),
-    /// run any configured before_cleanup hook.
+    /// Full cleanup: terminate if still running and remove local worktree (if any).
     async fn cleanup(
         &self,
         handle: &WorkerHandle,
