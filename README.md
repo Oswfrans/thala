@@ -4,11 +4,22 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92%2B-orange.svg)](https://www.rust-lang.org)
 
-This is an alpha version that I made because I found it interesting. Use at your own peril and discretion for now. Short pitch: Claude managed agents, but opensource.
+Thala is an opinionated framework that turns task descriptions (Beads) into verified PRs by orchestrating LLM workers across local tmux sessions or cloud containers.
 
-Thala is an opinionated open-source agent development framework for turning Beads tasks into reviewed code changes. It assembles context-rich prompts, spawns OpenCode workers in isolated tmux/git worktrees or remote containers such as Modal, or Cloudflare, monitors those sessions, and handles validation, retries, and human escalation - all driven by a per-product `WORKFLOW.md` config file.
+Short pitch: Claude managed agents, but opensource
 
-Model routing is config-driven via `WORKFLOW.md`. Beads is the supported tracker.
+[!CAUTION]
+Alpha Software: Thala is in active development. Expect breaking changes and use at your own discretion.
+
+## Feature Highlights
+
+Isolated Environments: Workers run in git worktrees, Modal containers, or Cloudflare Workers (k8s support on roadmap).
+
+Config-as-Code: Entire agent behaviors defined in a single WORKFLOW.md.
+
+Human-in-the-loop: Built-in escalation to Discord (Slack/Teams support pending) for validation and retries.
+
+Agnostic Routing: Single Discord (Slack/Teams support pending) bot can manage multiple repositories.
 
 ## Multi-Repo Discord Routing
 
