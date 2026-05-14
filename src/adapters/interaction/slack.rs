@@ -66,6 +66,13 @@ pub struct SlackInteraction {
 impl SlackInteraction {
     /// Open (or create) the Slack interaction adapter, initialising the SQLite inbox.
     pub fn new(config: SlackInteractionConfig) -> Result<Self, ThalaError> {
+        let config = SlackInteractionConfig {
+            bot_token: expand_env_var(&config.bot_token).unwrap_or(config.bot_token),
+            signing_secret: expand_env_var(&config.signing_secret).unwrap_or(config.signing_secret),
+            alerts_channel: config.alerts_channel,
+            db_path: config.db_path,
+        };
+
         if let Some(parent) = config.db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 ThalaError::interaction(format!(
@@ -442,4 +449,41 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+fn expand_env_var(raw: &str) -> Option<String> {
+    if let Some(name) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+        return std::env::var(name).ok();
+    }
+
+    let name = raw.strip_prefix('$')?;
+    if name
+        .chars()
+        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        return std::env::var(name).ok();
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expands_workflow_env_reference() {
+        unsafe {
+            std::env::set_var("THALA_TEST_SLACK_TOKEN", "xoxb-test");
+        }
+
+        assert_eq!(
+            expand_env_var("${THALA_TEST_SLACK_TOKEN}").as_deref(),
+            Some("xoxb-test")
+        );
+
+        unsafe {
+            std::env::remove_var("THALA_TEST_SLACK_TOKEN");
+        }
+    }
 }

@@ -85,6 +85,10 @@ execution:
   github_token_env: THALA_GITHUB_TOKEN
 ```
 
+Cloudflare completion is detected by polling the control plane status/result
+endpoints. Unlike Modal, this backend does not require `callback_base_url` for
+normal operation.
+
 Create local Worker secrets in `.dev.vars`:
 
 ```bash
@@ -126,6 +130,27 @@ THALA_CF_TOKEN
 THALA_CF_MAX_DURATION_SECONDS optional, defaults to 1800
 THALA_CF_ALLOW_NETWORK optional, defaults to true; false is rejected until Sandbox network isolation is implemented
 ```
+
+Slack support is available at the same Thala process when `slack:` is present
+in `WORKFLOW.md`:
+
+```yaml
+slack:
+  bot_token: "${SLACK_BOT_TOKEN}"
+  signing_secret: "${SLACK_SIGNING_SECRET}"
+  alerts_channel: "C0123456789"
+```
+
+Slack routes:
+
+```text
+POST /api/slack/command
+POST /api/slack/interaction
+```
+
+`THALA_SLACK_BIND` controls the bind address and defaults to
+`127.0.0.1:8790`. `SLACK_INTAKE_ENABLED=false` disables slash-command task
+creation. `SLACK_INTERACTION_ENABLED=false` disables button callbacks.
 
 Worker side secrets:
 

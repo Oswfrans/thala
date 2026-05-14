@@ -14,6 +14,8 @@ use thala::adapters::execution::router::DefaultBackendRouter;
 use thala::adapters::execution::{CloudflareBackend, LocalBackend, ModalBackend, ModalConfig};
 use thala::adapters::intake::discord::{DiscordIntake, DiscordIntakeConfig};
 use thala::adapters::intake::discord_webhook::{DiscordWebhookConfig, DiscordWebhookServer};
+use thala::adapters::intake::slack::{SlackIntake, SlackIntakeConfig};
+use thala::adapters::intake::slack_webhook::{SlackWebhookConfig, SlackWebhookServer};
 use thala::adapters::interaction::discord::{DiscordInteraction, DiscordInteractionConfig};
 use thala::adapters::interaction::slack::{SlackInteraction, SlackInteractionConfig};
 use thala::adapters::repo::GitRepoProvider;
@@ -147,8 +149,10 @@ async fn main() -> Result<()> {
 
     // Interaction layers (optional — only added when config is present)
     let mut interaction_layers: Vec<Arc<dyn InteractionLayer>> = Vec::new();
+    let mut slack_intake: Option<Arc<SlackIntake>> = None;
+    let mut slack_interaction: Option<Arc<SlackInteraction>> = None;
     if let Some(slack_cfg) = &workflow.slack {
-        interaction_layers.push(Arc::new(
+        let interaction = Arc::new(
             SlackInteraction::new(SlackInteractionConfig {
                 bot_token: slack_cfg.bot_token.clone(),
                 signing_secret: slack_cfg.signing_secret.clone(),
@@ -156,7 +160,35 @@ async fn main() -> Result<()> {
                 db_path: state_dir.join("slack-interactions.db"),
             })
             .context("Failed to open Slack interactions database")?,
-        ));
+        );
+        interaction_layers.push(interaction.clone());
+        slack_interaction = Some(interaction);
+
+        if std::env::var("SLACK_INTAKE_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(true)
+        {
+            let manager_api_key = std::env::var("OPENROUTER_API_KEY")
+                .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+                .unwrap_or_default();
+            let manager_api_base = std::env::var("MANAGER_API_BASE")
+                .unwrap_or_else(|_| "https://openrouter.ai/api/v1".into());
+
+            let sink_trait: Arc<dyn thala::ports::task_sink::TaskSink> = sink.clone();
+            slack_intake = Some(Arc::new(SlackIntake::new(
+                SlackIntakeConfig {
+                    bot_token: slack_cfg.bot_token.clone(),
+                    signing_secret: slack_cfg.signing_secret.clone(),
+                    manager_api_key,
+                    manager_api_base,
+                    planning_model: workflow.models.manager.clone(),
+                    product: workflow.product.clone(),
+                },
+                sink_trait,
+            )));
+
+            info!("Slack intake enabled");
+        }
     }
     // Discord interaction and intake (for approvals and task creation)
     let mut discord_intake: Option<Arc<DiscordIntake>> = None;
@@ -293,6 +325,26 @@ async fn main() -> Result<()> {
         info!("Discord webhook server started");
     }
 
+    // ── Start Slack webhook server (if configured) ────────────────────────────
+
+    let mut slack_webhook_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if let Some(interaction) = &slack_interaction {
+        let webhook_config = SlackWebhookConfig::from_env()?;
+        let webhook_server = SlackWebhookServer::new(
+            webhook_config,
+            Arc::clone(interaction),
+            slack_intake.clone(),
+        );
+
+        slack_webhook_handle = Some(tokio::spawn(async move {
+            if let Err(e) = webhook_server.run().await {
+                tracing::error!("Slack webhook server error: {}", e);
+            }
+        }));
+
+        info!("Slack webhook server started");
+    }
+
     // ── Start engine ──────────────────────────────────────────────────────────
 
     info!("Starting Thala orchestration engine");
@@ -312,6 +364,9 @@ async fn main() -> Result<()> {
 
     // Clean up webhook server
     if let Some(handle) = discord_webhook_handle {
+        handle.abort();
+    }
+    if let Some(handle) = slack_webhook_handle {
         handle.abort();
     }
 

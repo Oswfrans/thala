@@ -7,3 +7,4 @@ pub mod discord;
 pub mod discord_webhook;
 pub mod planner;
 pub mod slack;
+pub mod slack_webhook;
