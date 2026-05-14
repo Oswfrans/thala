@@ -58,11 +58,14 @@ import modal
 # To enable v2 workspace-wide: modal.com/settings/image-config
 worker_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git", "curl", "jq", "openssl")
+    .apt_install("git", "curl", "jq", "openssl", "unzip")
     .run_commands(
         "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
         "apt-get install -y nodejs",
         "npm install -g opencode-ai@latest",
+        "curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash",
+        "ln -sf /usr/local/bin/bun /usr/local/bin/bunx",
+        "node --version && npm --version && opencode --version && bun --version",
     )
 )
 
