@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "thala.fullname" . }}-workflow
+  labels:
+    {{- include "thala.labels" . | nindent 4 }}
+data:
+  WORKFLOW.md: |
+{{ if .Values.workflow.content }}
+{{ .Values.workflow.content | nindent 4 }}
+{{ else }}
+    ---
+    product: {{ .Values.workflow.product | quote }}
+    github_repo: {{ .Values.workflow.githubRepo | quote }}
+
+    tracker:
+      backend: beads
+      beads_workspace_root: {{ .Values.workflow.workspaceRoot | quote }}
+      beads_ready_status: open
+
+    execution:
+      backend: kubernetes
+      workspace_root: {{ .Values.workflow.workspaceRoot | quote }}
+      github_token_env: THALA_GITHUB_TOKEN
+      callback_base_url: {{ required "workflow.callbackBaseUrl is required" .Values.workflow.callbackBaseUrl | quote }}
+
+    models:
+      worker: {{ .Values.workflow.workerModel | quote }}
+      manager: {{ .Values.workflow.managerModel | quote }}
+
+    limits:
+      max_concurrent_runs: {{ .Values.workflow.maxConcurrentRuns }}
+      stall_timeout_ms: {{ .Values.workflow.stallTimeoutMs }}
+
+    retry:
+      max_attempts: 3
+      allow_backend_reroute: false
+
+    merge:
+      auto_merge: false
+    ---
+    You are an expert developer on {{ "{{" }} product_name {{ "}}" }}.
+
+    ## Task
+    **ID:** {{ "{{" }} issue.identifier {{ "}}" }}
+    **Title:** {{ "{{" }} issue.title {{ "}}" }}
+    **Attempt:** {{ "{{" }} run.attempt {{ "}}" }}
+
+    ## Acceptance Criteria
+    {{ "{{" }} issue.acceptance_criteria {{ "}}" }}
+{{ end }}

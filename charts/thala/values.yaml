@@ -1,0 +1,56 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/example/thala
+  tag: latest
+  pullPolicy: IfNotPresent
+
+worker:
+  image: ghcr.io/example/thala-worker:latest
+  serviceAccountName: thala-worker
+  imagePullPolicy: IfNotPresent
+  automountServiceAccountToken: false
+  terminationGraceSeconds: 10
+
+serviceAccount:
+  create: true
+  name: thala-orchestrator
+
+rbac:
+  create: true
+
+githubToken:
+  existingSecret: github-token
+  key: token
+
+secretEnv:
+  - name: OPENROUTER_API_KEY
+    secretName: llm-secrets
+    secretKey: openrouter
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 10Gi
+
+workflow:
+  product: example-app
+  githubRepo: example/example-app
+  workspaceRoot: /workspace/example-app
+  callbackBaseUrl: https://thala.example.com
+  workerModel: openrouter/moonshotai/kimi-k2.5
+  managerModel: anthropic/claude-opus-4-6
+  maxConcurrentRuns: 3
+  stallTimeoutMs: 300000
+  content: ""
+
+extraEnv: []
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

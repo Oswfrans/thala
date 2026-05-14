@@ -18,6 +18,7 @@ Localized hubs:
 | Check config defaults and keys quickly | [config-reference.md](reference/api/config-reference.md) |
 | Configure custom providers/endpoints | [custom-providers.md](contributing/custom-providers.md) |
 | Run worker fanout on Kubernetes | [kubernetes-backend.md](kubernetes-backend.md) |
+| Install Thala on Kubernetes with Helm | [charts/thala/README.md](../charts/thala/README.md) |
 | Configure Z.AI / GLM provider | [zai-glm-setup.md](setup-guides/zai-glm-setup.md) |
 | Use LangGraph integration patterns | [langgraph-integration.md](contributing/langgraph-integration.md) |
 | Operate runtime (day-2 runbook) | [operations-runbook.md](ops/operations-runbook.md) |

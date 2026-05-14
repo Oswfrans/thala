@@ -37,6 +37,7 @@ This file is the canonical table of contents for the documentation currently pre
 
 ## Operations
 
+- [../charts/thala/README.md](../charts/thala/README.md)
 - [kubernetes-backend.md](kubernetes-backend.md)
 - [ops/operations-runbook.md](ops/operations-runbook.md)
 - [ops/troubleshooting.md](ops/troubleshooting.md)

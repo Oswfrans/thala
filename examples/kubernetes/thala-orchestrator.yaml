@@ -19,6 +19,7 @@ kind: ServiceAccount
 metadata:
   name: thala-worker
   namespace: thala
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -125,6 +126,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: THALA_K8S_SERVICE_ACCOUNT
               value: thala-worker
+            - name: THALA_K8S_WORKER_AUTOMOUNT_TOKEN
+              value: "false"
             - name: THALA_K8S_GITHUB_TOKEN_SECRET
               value: github-token:token
             - name: THALA_K8S_SECRET_ENV

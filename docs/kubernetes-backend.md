@@ -44,6 +44,23 @@ For an end-to-end in-cluster starting point, see
 Deployment, service accounts, RBAC, a sample WORKFLOW.md ConfigMap, and worker
 Pod environment wiring.
 
+For day-to-day installation, prefer the Helm chart in `charts/thala`. The chart
+packages the same pieces with configurable images, RBAC, service accounts,
+workspace persistence, existing secret references, and WORKFLOW.md generation.
+
+```bash
+helm upgrade --install thala ./charts/thala \
+  --namespace thala \
+  --create-namespace \
+  --set image.repository=ghcr.io/acme/thala \
+  --set image.tag=2026-05-14 \
+  --set worker.image=ghcr.io/acme/thala-worker:2026-05-14 \
+  --set workflow.product=example-app \
+  --set workflow.githubRepo=example/example-app \
+  --set workflow.workspaceRoot=/workspace/example-app \
+  --set workflow.callbackBaseUrl=https://thala.example.com
+```
+
 ## Environment
 
 Set these on the Thala process:
@@ -53,6 +70,7 @@ export THALA_K8S_WORKER_IMAGE=ghcr.io/acme/thala-worker:2026-05-14
 export THALA_K8S_NAMESPACE=thala-workers
 export THALA_K8S_SERVICE_ACCOUNT=thala-worker
 export THALA_K8S_IMAGE_PULL_POLICY=IfNotPresent
+export THALA_K8S_WORKER_AUTOMOUNT_TOKEN=false
 export THALA_K8S_GITHUB_TOKEN_SECRET=github-token:token
 export THALA_K8S_SECRET_ENV=OPENROUTER_API_KEY=llm-secrets:openrouter
 ```
@@ -118,7 +136,10 @@ roleRef:
 ```
 
 Use a separate worker service account (`THALA_K8S_SERVICE_ACCOUNT`) when worker
-Pods need their own identity or network policy.
+Pods need their own identity or network policy. Worker Pods do not mount a
+Kubernetes service account token by default; set
+`THALA_K8S_WORKER_AUTOMOUNT_TOKEN=true` only if the worker itself must call the
+Kubernetes API.
 
 ## Secrets
 

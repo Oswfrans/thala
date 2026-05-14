@@ -45,6 +45,8 @@ pub struct KubernetesConfig {
     pub service_account_name: Option<String>,
     /// Optional image pull policy, for example `IfNotPresent` or `Always`.
     pub image_pull_policy: Option<String>,
+    /// Whether worker Pods should mount a Kubernetes service account token.
+    pub automount_service_account_token: bool,
     /// Optional secret reference for the product repo GitHub token.
     pub github_token_secret: Option<SecretKeyRef>,
     /// Extra env vars sourced from Kubernetes Secrets.
@@ -82,6 +84,7 @@ impl KubernetesConfig {
     ///   - `THALA_K8S_CA_CERT`
     ///   - `THALA_K8S_SERVICE_ACCOUNT`
     ///   - `THALA_K8S_IMAGE_PULL_POLICY`
+    ///   - `THALA_K8S_WORKER_AUTOMOUNT_TOKEN` (optional, defaults false)
     ///   - `THALA_K8S_GITHUB_TOKEN_SECRET=secret:key`
     ///   - `THALA_K8S_SECRET_ENV=OPENROUTER_API_KEY=llm-secrets:openrouter,...`
     ///   - `THALA_K8S_TERMINATION_GRACE_SECONDS`
@@ -119,6 +122,9 @@ impl KubernetesConfig {
             image_pull_policy: std::env::var("THALA_K8S_IMAGE_PULL_POLICY")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            automount_service_account_token: std::env::var("THALA_K8S_WORKER_AUTOMOUNT_TOKEN")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+                .unwrap_or(false),
             github_token_secret: std::env::var("THALA_K8S_GITHUB_TOKEN_SECRET")
                 .ok()
                 .and_then(|v| parse_secret_key_ref(&v).ok()),
@@ -308,6 +314,7 @@ impl KubernetesBackend {
 
         let mut spec = json!({
             "restartPolicy": "Never",
+            "automountServiceAccountToken": self.config.automount_service_account_token,
             "terminationGracePeriodSeconds": self.config.termination_grace_period_seconds,
             "containers": [container],
         });
@@ -822,6 +829,7 @@ mod tests {
             worker_image: "thala-worker:test".into(),
             service_account_name: Some("thala-worker".into()),
             image_pull_policy: Some("IfNotPresent".into()),
+            automount_service_account_token: false,
             github_token_secret: Some(SecretKeyRef {
                 name: "git".into(),
                 key: "token".into(),

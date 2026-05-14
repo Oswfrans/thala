@@ -43,6 +43,7 @@ fn kubernetes_config(base_url: String) -> KubernetesConfig {
         worker_image: "ghcr.io/example/thala-worker:test".into(),
         service_account_name: Some("thala-worker".into()),
         image_pull_policy: Some("IfNotPresent".into()),
+        automount_service_account_token: false,
         github_token_secret: Some(SecretKeyRef {
             name: "github-token".into(),
             key: "token".into(),
@@ -241,6 +242,7 @@ fn kubernetes_backend_builds_pod_from_launch_request() {
 
     assert_eq!(pod["metadata"]["name"], "thala-demo-app-bd-123-1");
     assert_eq!(pod["spec"]["restartPolicy"], "Never");
+    assert_eq!(pod["spec"]["automountServiceAccountToken"], false);
     assert_eq!(
         pod["spec"]["containers"][0]["env"]
             .as_array()

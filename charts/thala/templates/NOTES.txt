@@ -1,0 +1,17 @@
+Thala has been installed.
+
+Next checks:
+  1. Confirm the workspace PVC contains a git checkout with .beads:
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "thala.fullname" . }} -- ls /workspace
+
+  2. Confirm the orchestrator can create worker Pods:
+     kubectl -n {{ .Release.Namespace }} auth can-i create pods --as=system:serviceaccount:{{ .Release.Namespace }}:{{ include "thala.serviceAccountName" . }}
+
+  3. Watch orchestrator logs:
+     kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "thala.fullname" . }} -f
+
+Worker image:
+  {{ .Values.worker.image }}
+
+Workflow ConfigMap:
+  {{ include "thala.fullname" . }}-workflow
