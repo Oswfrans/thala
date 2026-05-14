@@ -318,6 +318,7 @@ fn parse_backend_kind(name: &str) -> ExecutionBackendKind {
     match name.to_lowercase().as_str() {
         "modal" => ExecutionBackendKind::Modal,
         "cloudflare" | "cf" => ExecutionBackendKind::Cloudflare,
+        "kubernetes" | "k8s" => ExecutionBackendKind::Kubernetes,
         _ => ExecutionBackendKind::Local,
     }
 }

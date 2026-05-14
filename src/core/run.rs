@@ -24,6 +24,8 @@ pub enum ExecutionBackendKind {
     Modal,
     /// Cloudflare Worker/Durable Object control plane backed by Sandbox containers.
     Cloudflare,
+    /// Kubernetes Pod running the Thala worker container.
+    Kubernetes,
 }
 
 impl ExecutionBackendKind {
@@ -32,6 +34,7 @@ impl ExecutionBackendKind {
             Self::Local => "local",
             Self::Modal => "modal",
             Self::Cloudflare => "cloudflare",
+            Self::Kubernetes => "kubernetes",
         }
     }
 
@@ -49,6 +52,7 @@ impl ExecutionBackendKind {
 /// - Local: tmux session name (e.g. "thala-example-app-bd-a1b2")
 /// - Modal: function call ID (e.g. "fc-abc123def456")
 /// - Cloudflare: control-plane remote run ID
+/// - Kubernetes: Pod name in the configured namespace
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerHandle {
     pub job_id: String,

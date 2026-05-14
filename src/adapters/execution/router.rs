@@ -1,7 +1,7 @@
 //! DefaultBackendRouter — routes tasks to the configured execution backend.
 //!
 //! The default router reads the configured backend from WorkflowConfig.
-//! All three backends (Local, Modal, Cloudflare) are registered at construction
+//! All backends are registered at construction
 //! time so routing decisions can be made at runtime without reconstruction.
 //!
 //! The router also handles reroute decisions for retries.
@@ -20,6 +20,7 @@ pub struct DefaultBackendRouter {
     local: Arc<dyn ExecutionBackend>,
     modal: Arc<dyn ExecutionBackend>,
     cloudflare: Arc<dyn ExecutionBackend>,
+    kubernetes: Arc<dyn ExecutionBackend>,
 }
 
 impl DefaultBackendRouter {
@@ -27,11 +28,13 @@ impl DefaultBackendRouter {
         local: Arc<dyn ExecutionBackend>,
         modal: Arc<dyn ExecutionBackend>,
         cloudflare: Arc<dyn ExecutionBackend>,
+        kubernetes: Arc<dyn ExecutionBackend>,
     ) -> Self {
         Self {
             local,
             modal,
             cloudflare,
+            kubernetes,
         }
     }
 }
@@ -55,6 +58,7 @@ impl BackendRouter for DefaultBackendRouter {
                 let kind = match backend_name.to_lowercase().as_str() {
                     "modal" => ExecutionBackendKind::Modal,
                     "cloudflare" | "cf" => ExecutionBackendKind::Cloudflare,
+                    "kubernetes" | "k8s" => ExecutionBackendKind::Kubernetes,
                     "local" => ExecutionBackendKind::Local,
                     other => {
                         tracing::warn!(
@@ -83,6 +87,7 @@ impl BackendRouter for DefaultBackendRouter {
             ExecutionBackendKind::Local => self.local.clone(),
             ExecutionBackendKind::Modal => self.modal.clone(),
             ExecutionBackendKind::Cloudflare => self.cloudflare.clone(),
+            ExecutionBackendKind::Kubernetes => self.kubernetes.clone(),
         }
     }
 
@@ -111,9 +116,9 @@ impl BackendRouter for DefaultBackendRouter {
         // Default fallback: non-local → Local, Local → Modal.
         match failed_backend {
             ExecutionBackendKind::Local => Some(ExecutionBackendKind::Modal),
-            ExecutionBackendKind::Modal | ExecutionBackendKind::Cloudflare => {
-                Some(ExecutionBackendKind::Local)
-            }
+            ExecutionBackendKind::Modal
+            | ExecutionBackendKind::Cloudflare
+            | ExecutionBackendKind::Kubernetes => Some(ExecutionBackendKind::Local),
         }
     }
 }

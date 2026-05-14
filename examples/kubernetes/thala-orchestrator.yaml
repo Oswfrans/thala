@@ -1,0 +1,149 @@
+# Example Kubernetes deployment for running the Thala orchestrator in-cluster.
+#
+# Replace image names, callback URL, GitHub repo, workspace bootstrap, and secret
+# names before applying. Secrets are referenced by name only; do not commit real
+# token values into this file.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: thala
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thala-orchestrator
+  namespace: thala
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: thala-worker
+  namespace: thala
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: thala-pod-runner
+  namespace: thala
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: thala-pod-runner
+  namespace: thala
+subjects:
+  - kind: ServiceAccount
+    name: thala-orchestrator
+    namespace: thala
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: thala-pod-runner
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: thala-workflow
+  namespace: thala
+data:
+  WORKFLOW.md: |
+    ---
+    product: "example-app"
+    github_repo: "example/example-app"
+
+    tracker:
+      backend: beads
+      beads_workspace_root: /workspace/example-app
+      beads_ready_status: open
+
+    execution:
+      backend: kubernetes
+      workspace_root: /workspace/example-app
+      github_token_env: THALA_GITHUB_TOKEN
+      callback_base_url: https://thala.example.com
+
+    models:
+      worker: "openrouter/moonshotai/kimi-k2.5"
+      manager: "anthropic/claude-opus-4-6"
+
+    limits:
+      max_concurrent_runs: 3
+      stall_timeout_ms: 300000
+
+    retry:
+      max_attempts: 3
+      allow_backend_reroute: true
+      reroute_to: local
+
+    merge:
+      auto_merge: false
+    ---
+    You are an expert developer on {{ product_name }}.
+
+    ## Task
+    **ID:** {{ issue.identifier }}
+    **Title:** {{ issue.title }}
+    **Attempt:** {{ run.attempt }}
+
+    ## Acceptance Criteria
+    {{ issue.acceptance_criteria }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thala-orchestrator
+  namespace: thala
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: thala-orchestrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: thala-orchestrator
+    spec:
+      serviceAccountName: thala-orchestrator
+      containers:
+        - name: thala
+          image: ghcr.io/example/thala:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--workflow", "/etc/thala/WORKFLOW.md", "run"]
+          env:
+            - name: THALA_K8S_WORKER_IMAGE
+              value: ghcr.io/example/thala-worker:latest
+            - name: THALA_K8S_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: THALA_K8S_SERVICE_ACCOUNT
+              value: thala-worker
+            - name: THALA_K8S_GITHUB_TOKEN_SECRET
+              value: github-token:token
+            - name: THALA_K8S_SECRET_ENV
+              value: OPENROUTER_API_KEY=llm-secrets:openrouter
+            - name: THALA_GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: github-token
+                  key: token
+          volumeMounts:
+            - name: workflow
+              mountPath: /etc/thala
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: workflow
+          configMap:
+            name: thala-workflow
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: thala-workspace

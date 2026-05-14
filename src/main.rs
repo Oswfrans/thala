@@ -11,7 +11,9 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use thala::adapters::beads::{BeadsTaskSink, BeadsTaskSource};
 use thala::adapters::execution::router::DefaultBackendRouter;
-use thala::adapters::execution::{CloudflareBackend, LocalBackend, ModalBackend, ModalConfig};
+use thala::adapters::execution::{
+    CloudflareBackend, KubernetesBackend, LocalBackend, ModalBackend, ModalConfig,
+};
 use thala::adapters::intake::discord::{DiscordIntake, DiscordIntakeConfig};
 use thala::adapters::intake::discord_webhook::{DiscordWebhookConfig, DiscordWebhookServer};
 use thala::adapters::intake::slack::{SlackIntake, SlackIntakeConfig};
@@ -135,7 +137,10 @@ async fn main() -> Result<()> {
     let local = Arc::new(LocalBackend::new());
     let modal = Arc::new(ModalBackend::new(ModalConfig::from_env()));
     let cloudflare = Arc::new(CloudflareBackend::from_env());
-    let router = Arc::new(DefaultBackendRouter::new(local, modal, cloudflare));
+    let kubernetes = Arc::new(KubernetesBackend::from_env());
+    let router = Arc::new(DefaultBackendRouter::new(
+        local, modal, cloudflare, kubernetes,
+    ));
 
     // Data directory — used by both the state store and the Slack inbox.
     let state_dir = std::env::var("XDG_DATA_HOME")

@@ -6,6 +6,7 @@
 // Tests requiring real credentials are in tests/live/.
 
 use thala::adapters::execution::cloudflare::{CloudflareBackend, CloudflareConfig};
+use thala::adapters::execution::kubernetes::{KubernetesBackend, KubernetesConfig, SecretKeyRef};
 use thala::adapters::execution::local::LocalBackend;
 use thala::adapters::execution::modal::{ModalBackend, ModalConfig};
 use thala::adapters::validation::noop::NoopValidator;
@@ -17,6 +18,8 @@ use thala::core::task::TaskSpec;
 use thala::core::validation::ValidatorKind;
 use thala::ports::execution::{ExecutionBackend, LaunchRequest};
 use thala::ports::validator::Validator;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn dummy_spec(id: &str) -> TaskSpec {
     TaskSpec {
@@ -28,6 +31,24 @@ fn dummy_spec(id: &str) -> TaskSpec {
         model_override: None,
         always_human_review: false,
         labels: vec![],
+    }
+}
+
+fn kubernetes_config(base_url: String) -> KubernetesConfig {
+    KubernetesConfig {
+        api_server: base_url,
+        namespace: "thala".into(),
+        bearer_token: "test-token".into(),
+        ca_cert_path: None,
+        worker_image: "ghcr.io/example/thala-worker:test".into(),
+        service_account_name: Some("thala-worker".into()),
+        image_pull_policy: Some("IfNotPresent".into()),
+        github_token_secret: Some(SecretKeyRef {
+            name: "github-token".into(),
+            key: "token".into(),
+        }),
+        secret_env: Vec::new(),
+        termination_grace_period_seconds: 5,
     }
 }
 
@@ -194,6 +215,81 @@ fn cloudflare_config_from_env_parses_resource_limits() {
     assert!(!config.allow_network);
     std::env::remove_var("THALA_CF_MAX_DURATION_SECONDS");
     std::env::remove_var("THALA_CF_ALLOW_NETWORK");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KubernetesBackend tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn kubernetes_backend_reports_correct_kind() {
+    let backend = KubernetesBackend::new(kubernetes_config("http://localhost".into()));
+    assert_eq!(backend.kind(), ExecutionBackendKind::Kubernetes);
+    assert!(!backend.is_local());
+    assert_eq!(backend.name(), "kubernetes");
+}
+
+#[test]
+fn kubernetes_backend_builds_pod_from_launch_request() {
+    let backend = KubernetesBackend::new(kubernetes_config("http://localhost".into()));
+    let mut req = launch_request_for_backend();
+    req.callback_url = Some("https://thala.example.com/api/worker/callback".into());
+    req.product = "demo-app".into();
+    req.task_id = "BD/123".into();
+
+    let pod = backend.build_pod(&req).unwrap();
+
+    assert_eq!(pod["metadata"]["name"], "thala-demo-app-bd-123-1");
+    assert_eq!(pod["spec"]["restartPolicy"], "Never");
+    assert_eq!(
+        pod["spec"]["containers"][0]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|env| env["name"] == "GITHUB_TOKEN")
+            .unwrap()["valueFrom"]["secretKeyRef"]["name"],
+        "github-token"
+    );
+}
+
+#[tokio::test]
+async fn kubernetes_backend_launch_surfaces_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/namespaces/thala/pods"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "kind": "Status",
+            "message": "pods is forbidden"
+        })))
+        .mount(&server)
+        .await;
+
+    let backend = KubernetesBackend::new(kubernetes_config(server.uri()));
+    let mut req = launch_request_for_backend();
+    req.callback_url = Some("https://thala.example.com/api/worker/callback".into());
+
+    let err = backend.launch(req).await.unwrap_err();
+    assert!(err.to_string().contains("403"));
+    assert!(err.to_string().contains("pods is forbidden"));
+}
+
+#[tokio::test]
+async fn kubernetes_backend_observe_rejects_malformed_pod_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/thala/pods/thala-demo-bd-test-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("{not json"))
+        .mount(&server)
+        .await;
+
+    let backend = KubernetesBackend::new(kubernetes_config(server.uri()));
+    let handle = WorkerHandle {
+        job_id: "thala-demo-bd-test-1".into(),
+        backend: ExecutionBackendKind::Kubernetes,
+    };
+
+    let err = backend.observe(&handle, None).await.unwrap_err();
+    assert!(err.to_string().contains("JSON parse failed"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
