@@ -313,6 +313,7 @@ fn build_slack_blocks(request: &InteractionRequest) -> serde_json::Value {
 
     // Add context based on request kind.
     let context_text = match &request.kind {
+        InteractionRequestKind::StatusNotification { status } => Some(format!("Status: {status}")),
         InteractionRequestKind::ApprovalRequired { pr_url, pr_number } => {
             Some(format!("<{pr_url}|PR #{pr_number}>"))
         }

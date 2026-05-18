@@ -220,6 +220,15 @@ async fn route_event(
         } => {
             tracing::debug!(task_id = %task_id, run_id = %run_id, "Routing RunCompleted");
             validator.handle_run_completed(&task_id, &run_id).await?;
+            send_status_notification(
+                &interaction_layers,
+                task_id,
+                run_id,
+                "Worker completed",
+                "validating",
+                "The worker reported completion. Thala is validating the result.",
+            )
+            .await;
         }
 
         // Route RunTimedOut to a stuck-recovery path: create an interaction ticket so
@@ -256,20 +265,7 @@ async fn route_event(
                 ],
             );
 
-            let ticket = InteractionTicket::new(req.clone());
-            if let Err(e) = store.save_ticket(&ticket).await {
-                tracing::error!(task_id = %task_id, "Failed to persist stuck ticket: {e}");
-            }
-
-            // Also send immediately to all layers (human loop will retry on failure).
-            for layer in &interaction_layers {
-                if let Err(e) = layer.send(&req).await {
-                    tracing::warn!(
-                        channel = layer.name(),
-                        "Failed to send stuck notification: {e}"
-                    );
-                }
-            }
+            save_and_send_ticket(&store, &interaction_layers, InteractionTicket::new(req)).await;
         }
 
         OrchestratorEvent::RunFailed {
@@ -304,19 +300,7 @@ async fn route_event(
                 ],
             );
 
-            let ticket = InteractionTicket::new(req.clone());
-            if let Err(e) = store.save_ticket(&ticket).await {
-                tracing::error!(task_id = %task_id, "Failed to persist failed-run ticket: {e}");
-            }
-
-            for layer in &interaction_layers {
-                if let Err(e) = layer.send(&req).await {
-                    tracing::warn!(
-                        channel = layer.name(),
-                        "Failed to send failed-run notification: {e}"
-                    );
-                }
-            }
+            save_and_send_ticket(&store, &interaction_layers, InteractionTicket::new(req)).await;
         }
 
         // Route InteractionResolved: if the human decision moved the task back to
@@ -362,6 +346,40 @@ async fn route_event(
                 passed = outcome.passed,
                 "Routing ValidationResult (informational)"
             );
+            let status = if outcome.passed {
+                "review-passed"
+            } else {
+                "review-rejected"
+            };
+            send_status_notification(
+                &interaction_layers,
+                task_id,
+                run_id,
+                "Validation update",
+                status,
+                outcome.summary.clone(),
+            )
+            .await;
+        }
+
+        OrchestratorEvent::RunLaunched {
+            task_id,
+            run_id,
+            backend,
+            ..
+        } => {
+            send_status_notification(
+                &interaction_layers,
+                task_id,
+                run_id,
+                "Worker launched",
+                "running",
+                format!(
+                    "Thala launched a worker on the `{}` backend.",
+                    backend.as_str()
+                ),
+            )
+            .await;
         }
 
         _ => {
@@ -370,4 +388,82 @@ async fn route_event(
     }
 
     Ok(())
+}
+
+async fn send_status_notification(
+    interaction_layers: &[Arc<dyn InteractionLayer>],
+    task_id: crate::core::ids::TaskId,
+    run_id: crate::core::ids::RunId,
+    summary: impl Into<String>,
+    status: impl Into<String>,
+    detail: impl Into<String>,
+) {
+    if interaction_layers.is_empty() {
+        return;
+    }
+
+    let req = InteractionRequest::new(
+        task_id,
+        run_id,
+        InteractionRequestKind::StatusNotification {
+            status: status.into(),
+        },
+        summary,
+        detail,
+        Vec::new(),
+    );
+
+    for layer in interaction_layers {
+        if let Err(e) = layer.send(&req).await {
+            tracing::warn!(
+                channel = layer.name(),
+                interaction_id = %req.id,
+                "Failed to send status notification: {e}"
+            );
+        }
+    }
+}
+
+async fn save_and_send_ticket(
+    store: &Arc<dyn StateStore>,
+    interaction_layers: &[Arc<dyn InteractionLayer>],
+    ticket: InteractionTicket,
+) {
+    if let Err(e) = store.save_ticket(&ticket).await {
+        tracing::error!(
+            task_id = %ticket.request.task_id,
+            interaction_id = %ticket.request.id,
+            "Failed to persist interaction ticket: {e}"
+        );
+        return;
+    }
+
+    let mut updated = ticket;
+    for layer in interaction_layers {
+        match layer.send(&updated.request).await {
+            Ok(Some(msg_ref)) => {
+                updated.channel_message_ref = Some(msg_ref);
+                updated.sent = true;
+            }
+            Ok(None) => {
+                updated.sent = true;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = layer.name(),
+                    interaction_id = %updated.request.id,
+                    "Failed to send interaction ticket: {e}"
+                );
+            }
+        }
+    }
+
+    if updated.sent {
+        if let Err(e) = store.update_ticket(&updated).await {
+            tracing::warn!(
+                interaction_id = %updated.request.id,
+                "Failed to mark interaction ticket sent: {e}"
+            );
+        }
+    }
 }

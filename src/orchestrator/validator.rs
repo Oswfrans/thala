@@ -214,6 +214,14 @@ impl ValidatorCoordinator {
             pr_url = %pr_url,
             "PR created, entering CI validation"
         );
+        self.send_status_notification(
+            task_id.clone(),
+            run_id.clone(),
+            "PR created",
+            "pr-created",
+            format!("Thala created PR #{pr_number}: {pr_url}"),
+        )
+        .await;
 
         // CI/merge decisions are handled by the validation polling loop.
         Ok(())
@@ -477,16 +485,29 @@ impl ValidatorCoordinator {
             vec![InteractionAction::Approve, InteractionAction::Reject],
         );
 
-        let ticket = crate::core::interaction::InteractionTicket::new(req.clone());
+        let mut ticket = crate::core::interaction::InteractionTicket::new(req);
         self.store.save_ticket(&ticket).await?;
 
         for layer in &self.interaction_layers {
-            if let Err(e) = layer.send(&req).await {
-                tracing::warn!(
-                    channel = layer.name(),
-                    "Failed to send approval request: {e}"
-                );
+            match layer.send(&ticket.request).await {
+                Ok(Some(msg_ref)) => {
+                    ticket.channel_message_ref = Some(msg_ref);
+                    ticket.sent = true;
+                }
+                Ok(None) => {
+                    ticket.sent = true;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = layer.name(),
+                        "Failed to send approval request: {e}"
+                    );
+                }
             }
+        }
+
+        if ticket.sent {
+            self.store.update_ticket(&ticket).await?;
         }
 
         Ok(())
@@ -530,13 +551,39 @@ impl ValidatorCoordinator {
     }
 
     async fn complete_task(&self, task_id: &TaskId, pr_number: u32) -> anyhow::Result<()> {
+        let mut completed_run_id = None;
+        let mut completed_pr_url = None;
+
         if let Some(mut record) = self.store.get_task(task_id).await? {
+            completed_run_id.clone_from(&record.active_run_id);
             record = apply_transition(&record, Transition::ValidationPassed)?;
             self.store.upsert_task(&record).await?;
         }
 
+        if let Some(run_id) = &completed_run_id {
+            if let Some(run) = self.store.get_run(run_id).await? {
+                completed_pr_url.clone_from(&run.pr_url);
+            }
+        }
+
         if let Err(e) = self.sink.mark_done(task_id.as_str(), pr_number).await {
             tracing::warn!(task_id = %task_id, "Failed to write done back to Beads: {e}");
+        }
+
+        if let Some(run_id) = completed_run_id {
+            let detail = if let Some(pr_url) = completed_pr_url {
+                format!("Task completed successfully and was synced to Beads. PR #{pr_number}: {pr_url}")
+            } else {
+                format!("Task completed successfully and was synced to Beads. PR #{pr_number}.")
+            };
+            self.send_status_notification(
+                task_id.clone(),
+                run_id,
+                "Task completed",
+                "done",
+                detail,
+            )
+            .await;
         }
 
         let _ = self
@@ -549,6 +596,40 @@ impl ValidatorCoordinator {
             .await;
 
         Ok(())
+    }
+
+    async fn send_status_notification(
+        &self,
+        task_id: TaskId,
+        run_id: RunId,
+        summary: impl Into<String>,
+        status: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        if self.interaction_layers.is_empty() {
+            return;
+        }
+
+        let req = InteractionRequest::new(
+            task_id,
+            run_id,
+            InteractionRequestKind::StatusNotification {
+                status: status.into(),
+            },
+            summary,
+            detail,
+            Vec::new(),
+        );
+
+        for layer in &self.interaction_layers {
+            if let Err(e) = layer.send(&req).await {
+                tracing::warn!(
+                    channel = layer.name(),
+                    interaction_id = %req.id,
+                    "Failed to send validation status notification: {e}"
+                );
+            }
+        }
     }
 }
 

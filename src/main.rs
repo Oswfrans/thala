@@ -296,9 +296,8 @@ async fn main() -> Result<()> {
     // ── Start Discord webhook server (if configured) ──────────────────────────
 
     let mut discord_webhook_handle: Option<tokio::task::JoinHandle<()>> = None;
-    if let (Some(discord_cfg), Some(intake), Some(interaction)) =
-        (&workflow.discord, &discord_intake, &discord_interaction)
-    {
+    if workflow.discord.is_some() && (discord_intake.is_some() || discord_interaction.is_some()) {
+        let discord_cfg = workflow.discord.as_ref().expect("checked above");
         let bind_addr = std::env::var("THALA_DISCORD_BIND")
             .ok()
             .map(|raw| {
@@ -317,8 +316,8 @@ async fn main() -> Result<()> {
 
         let webhook_server = DiscordWebhookServer::new(
             webhook_config,
-            Some(Arc::clone(intake)),
-            Some(Arc::clone(interaction)),
+            discord_intake.clone(),
+            discord_interaction.clone(),
         );
 
         discord_webhook_handle = Some(tokio::spawn(async move {

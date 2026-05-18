@@ -73,6 +73,9 @@ impl InteractionRequest {
 /// What kind of human input is being requested.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InteractionRequestKind {
+    /// Informational task/run status update; no human action is required.
+    StatusNotification { status: String },
+
     /// A PR is ready and a human must approve before merge.
     ApprovalRequired { pr_url: String, pr_number: u32 },
 

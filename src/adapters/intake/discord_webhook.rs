@@ -508,7 +508,9 @@ fn handle_slash_command(
                     let reply = intake_clone.handle_create(msg).await;
 
                     // Send follow-up message via Discord API
-                    let _ = send_followup_message(&bot_token, &channel_id, &reply).await;
+                    if let Err(e) = send_followup_message(&bot_token, &channel_id, &reply).await {
+                        tracing::warn!("Failed to send Discord intake follow-up: {e}");
+                    }
                 });
             } else {
                 return reply_response("Discord intake is not enabled.");

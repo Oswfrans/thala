@@ -225,6 +225,9 @@ fn expand_env_var(raw: &str) -> Option<String> {
 
 fn build_discord_message(request: &InteractionRequest) -> serde_json::Value {
     let description = match &request.kind {
+        InteractionRequestKind::StatusNotification { status } => {
+            format!("{}\n\n**Status:** {status}", request.detail)
+        }
         InteractionRequestKind::ApprovalRequired { pr_url, pr_number } => {
             format!("{}\n\n[PR #{pr_number}]({pr_url})", request.detail)
         }
@@ -292,11 +295,12 @@ fn build_discord_message(request: &InteractionRequest) -> serde_json::Value {
 
 fn embed_color(kind: &InteractionRequestKind) -> u32 {
     match kind {
-        InteractionRequestKind::ApprovalRequired { .. } => 0x0058_65F2, // Discord blurple
-        InteractionRequestKind::StuckNotification { .. } => 0x00FE_E75C, // yellow
+        InteractionRequestKind::StatusNotification { .. } => 0x0000_A86B, // green
+        InteractionRequestKind::ApprovalRequired { .. } => 0x0058_65F2,   // Discord blurple
+        InteractionRequestKind::StuckNotification { .. } => 0x00FE_E75C,  // yellow
         InteractionRequestKind::ReviewRejected { .. }
         | InteractionRequestKind::ManualResolution { .. } => 0x00ED_4245, // red
-        InteractionRequestKind::ContextNeeded { .. } => 0x00EB_459E,    // pink
+        InteractionRequestKind::ContextNeeded { .. } => 0x00EB_459E,      // pink
     }
 }
 
