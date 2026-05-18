@@ -25,7 +25,7 @@ use thala::adapters::state::SqliteStateStore;
 use thala::adapters::validation::review_ai::ReviewAiValidator;
 use thala::adapters::validation::NoopValidator;
 use thala::core::run::ExecutionBackendKind;
-use thala::core::workflow::WorkflowConfig;
+use thala::core::workflow::{WorkerRunnerKind, WorkflowConfig};
 use thala::onboard_wizard::run_enhanced_onboard;
 use thala::orchestrator::dispatcher::DispatcherConfig;
 use thala::orchestrator::engine::{EngineConfig, OrchestratorEngine};
@@ -382,10 +382,28 @@ async fn main() -> Result<()> {
 fn preflight_workflow(workflow: &WorkflowConfig, beads_root: &Path) -> Result<()> {
     ensure_tool_installed("bd", workflow.execution.backend.clone(), false)?;
     if workflow.execution.backend == ExecutionBackendKind::Local {
-        ensure_tool_installed("opencode", workflow.execution.backend.clone(), false)?;
+        let worker = workflow.worker_runner_config();
+        ensure_runner_installed(worker.runner, workflow.execution.backend.clone())?;
         ensure_tool_installed("tmux", workflow.execution.backend.clone(), false)?;
     }
     ensure_beads_workspace(beads_root, true)
+}
+
+fn ensure_runner_installed(runner: WorkerRunnerKind, backend: ExecutionBackendKind) -> Result<()> {
+    match runner {
+        WorkerRunnerKind::Pi => {
+            if find_binary("pi").is_none() {
+                anyhow::bail!(
+                    "pi is required for the {} backend worker runner. Install it with `curl -fsSL https://pi.dev/install.sh | sh` or `npm install -g @earendil-works/pi-coding-agent`.",
+                    backend.as_str()
+                );
+            }
+        }
+        WorkerRunnerKind::Opencode => {
+            ensure_tool_installed("opencode", backend, false)?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_tool_installed(
@@ -575,6 +593,7 @@ fn find_binary(name: &str) -> Option<PathBuf> {
             home.join("go/bin").join(name),
             home.join(".cargo/bin").join(name),
             home.join(".bun/bin").join(name),
+            home.join(".pi/bin").join(name),
         ]);
     }
 

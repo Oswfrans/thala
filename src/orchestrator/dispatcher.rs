@@ -191,6 +191,7 @@ impl Dispatcher {
             .map(|base| format!("{base}/api/worker/callback"));
 
         let github_token = std::env::var(&self.workflow.execution.github_token_env).ok();
+        let worker = self.workflow.worker_runner_config();
 
         // Persist the launch attempt before starting remote work. Fast remote
         // failures can call back before `launch()` returns; the callback server
@@ -205,6 +206,7 @@ impl Dispatcher {
             product: self.config.product.clone(),
             prompt,
             model,
+            worker,
             workspace_root: self.config.workspace_root.clone(),
             remote_branch,
             callback_url,

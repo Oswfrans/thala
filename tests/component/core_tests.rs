@@ -7,6 +7,7 @@ use thala::core::run::{ExecutionBackendKind, RunStatus, TaskRun};
 use thala::core::state::StateError;
 use thala::core::task::{TaskRecord, TaskSpec, TaskStatus};
 use thala::core::transitions::{apply_run_transition, apply_transition, RunTransition, Transition};
+use thala::core::workflow::{WorkerRunnerKind, WorkflowConfig};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test helpers
@@ -36,6 +37,83 @@ fn make_run(task_id: &str, attempt: u32) -> TaskRun {
         attempt,
         ExecutionBackendKind::Local,
     )
+}
+
+#[test]
+fn workflow_defaults_to_pi_worker_runner() {
+    let workflow = WorkflowConfig::from_markdown(
+        r#"---
+product: demo
+github_repo: example/demo
+---
+Prompt
+"#,
+    )
+    .unwrap();
+
+    let worker = workflow.worker_runner_config();
+    assert_eq!(worker.runner, WorkerRunnerKind::Pi);
+    assert_eq!(worker.extensions, vec!["autoresearch", "goal"]);
+}
+
+#[test]
+fn workflow_resolves_opencode_worker_runner() {
+    let workflow = WorkflowConfig::from_markdown(
+        r#"---
+product: demo
+github_repo: example/demo
+worker:
+  runner: opencode
+  extensions: []
+---
+Prompt
+"#,
+    )
+    .unwrap();
+
+    let worker = workflow.worker_runner_config();
+    assert_eq!(worker.runner, WorkerRunnerKind::Opencode);
+    assert!(worker.extensions.is_empty());
+}
+
+#[test]
+fn execution_worker_runner_alias_overrides_worker_block() {
+    let workflow = WorkflowConfig::from_markdown(
+        r#"---
+product: demo
+github_repo: example/demo
+execution:
+  worker_runner: opencode
+worker:
+  runner: pi
+---
+Prompt
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        workflow.worker_runner_config().runner,
+        WorkerRunnerKind::Opencode
+    );
+}
+
+#[test]
+fn unsafe_extension_names_are_rejected() {
+    let err = WorkflowConfig::from_markdown(
+        r#"---
+product: demo
+github_repo: example/demo
+worker:
+  extensions:
+    - "goal; rm -rf /"
+---
+Prompt
+"#,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("unsafe worker extension name"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

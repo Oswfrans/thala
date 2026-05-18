@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Thala Worker Entrypoint
 #
-# Clones the product repo at the task branch, runs OpenCode with the task
+# Clones the product repo at the task branch, runs the configured worker with the task
 # prompt, commits/pushes changes, then POSTs a completion callback to Thala.
 #
 # All required env vars are documented in Dockerfile.worker.
@@ -68,6 +68,19 @@ run_hook() {
     fi
 }
 
+valid_extension_name() {
+    local extension="$1"
+    [[ "${extension}" =~ ^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+}
+
+extension_source() {
+    case "$1" in
+        autoresearch) printf 'npm:pi-autoresearch' ;;
+        goal) printf 'npm:@narumitw/pi-goal' ;;
+        *) printf 'npm:%s' "$1" ;;
+    esac
+}
+
 echo "[thala-worker] Starting task ${THALA_TASK_ID} on branch ${THALA_TASK_BRANCH}"
 
 # ── Clone product repo ────────────────────────────────────────────────────────
@@ -109,13 +122,44 @@ if [[ -n "${THALA_BEFORE_RUN_HOOK:-}" ]]; then
     run_hook "${THALA_BEFORE_RUN_HOOK}" || echo "WARNING: before_run hook failed (continuing)" >&2
 fi
 
-# ── Run OpenCode ──────────────────────────────────────────────────────────────
-echo "[thala-worker] Launching OpenCode (model=${THALA_MODEL})"
+# ── Run configured worker ─────────────────────────────────────────────────────
+RUNNER="${THALA_WORKER_RUNNER:-pi}"
+EXTENSIONS="${THALA_WORKER_EXTENSIONS:-autoresearch,goal}"
+echo "[thala-worker] Launching ${RUNNER} (model=${THALA_MODEL})"
 
-OPENCODE_EXIT=0
-opencode --model "${THALA_MODEL}" --no-session -p "${PROMPT}" || OPENCODE_EXIT=$?
+WORKER_EXIT=0
+case "${RUNNER}" in
+    pi)
+        if ! command -v pi >/dev/null 2>&1; then
+            echo "ERROR: pi binary not found" >&2
+            WORKER_EXIT=127
+        else
+            IFS=',' read -r -a extension_list <<< "${EXTENSIONS}"
+            for extension in "${extension_list[@]}"; do
+                [[ -z "${extension}" ]] && continue
+                if ! valid_extension_name "${extension}"; then
+                    echo "ERROR: unsafe Pi extension name: ${extension}" >&2
+                    WORKER_EXIT=2
+                    break
+                fi
+                pi install "$(extension_source "${extension}")" || WORKER_EXIT=$?
+                [[ "${WORKER_EXIT}" -ne 0 ]] && break
+            done
+            if [[ "${WORKER_EXIT}" -eq 0 ]]; then
+                pi --model "${THALA_MODEL}" --no-session -p "${PROMPT}" || WORKER_EXIT=$?
+            fi
+        fi
+        ;;
+    opencode)
+        opencode --model "${THALA_MODEL}" --no-session -p "${PROMPT}" || WORKER_EXIT=$?
+        ;;
+    *)
+        echo "ERROR: unsupported worker runner: ${RUNNER}" >&2
+        WORKER_EXIT=2
+        ;;
+esac
 
-echo "[thala-worker] OpenCode exited with code ${OPENCODE_EXIT}"
+echo "[thala-worker] ${RUNNER} exited with code ${WORKER_EXIT}"
 
 # ── Run after_run hook (if present) ──────────────────────────────────────────
 if [[ -n "${THALA_AFTER_RUN_HOOK:-}" ]]; then
@@ -124,7 +168,7 @@ if [[ -n "${THALA_AFTER_RUN_HOOK:-}" ]]; then
 fi
 
 # ── Commit, push, and notify Thala ───────────────────────────────────────────
-if [[ "${OPENCODE_EXIT}" -eq 0 ]]; then
+if [[ "${WORKER_EXIT}" -eq 0 ]]; then
     if git diff --quiet && git diff --cached --quiet; then
         echo "[thala-worker] No changes to commit"
     else
@@ -135,7 +179,7 @@ if [[ "${OPENCODE_EXIT}" -eq 0 ]]; then
     fi
     send_callback "success" 0 ""
 else
-    send_callback "error" "${OPENCODE_EXIT}" "OpenCode exited with code ${OPENCODE_EXIT}"
+    send_callback "error" "${WORKER_EXIT}" "${RUNNER} exited with code ${WORKER_EXIT}"
 fi
 
-exit "${OPENCODE_EXIT}"
+exit "${WORKER_EXIT}"

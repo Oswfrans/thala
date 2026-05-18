@@ -19,7 +19,7 @@ pub fn run_enhanced_onboard() -> anyhow::Result<()> {
     println!("║           Thala Onboard Wizard — Discord + Modal           ║");
     println!("╚════════════════════════════════════════════════════════════╝");
     println!();
-    println!("This wizard sets up Thala with Discord intake/interaction and Modal workers.");
+    println!("This wizard sets up Thala with Discord intake/interaction and Modal Pi workers.");
     println!();
 
     // Collect all configuration
@@ -237,6 +237,12 @@ models:
   worker: "{worker_model}"
   manager: "{manager_model}"
   max_review_cycles: 2
+
+worker:
+  runner: pi
+  extensions:
+    - autoresearch
+    - goal
 
 limits:
   max_concurrent_runs: {max_concurrent_runs}

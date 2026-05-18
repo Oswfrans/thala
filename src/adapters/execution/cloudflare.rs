@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::adapters::execution::runner::validate_extensions;
 use crate::core::error::ThalaError;
 use crate::core::run::{ExecutionBackendKind, RunObservation, RunStatus, WorkerHandle};
 use crate::ports::execution::{ExecutionBackend, LaunchRequest, LaunchedRun};
@@ -80,12 +81,20 @@ pub struct InstructionSpec {
     pub prompt: String,
     pub working_dir: String,
     pub model: String,
+    pub worker_runner: WorkerRunnerSpec,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_create_hook: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_run_hook: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_run_hook: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerRunnerSpec {
+    pub runner: String,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +376,7 @@ impl ExecutionBackend for CloudflareBackend {
                 "github_repo is required for Cloudflare backend",
             )
         })?;
+        validate_extensions(&req.worker.extensions)?;
 
         let (owner, name) = parse_github_repo(github_repo)?;
         let start = StartTaskRequest {
@@ -382,6 +392,10 @@ impl ExecutionBackend for CloudflareBackend {
                 prompt: req.prompt,
                 working_dir: ".".into(),
                 model: req.model,
+                worker_runner: WorkerRunnerSpec {
+                    runner: req.worker.runner.as_str().into(),
+                    extensions: req.worker.extensions.clone(),
+                },
                 after_create_hook: req.after_create_hook,
                 before_run_hook: req.before_run_hook,
                 after_run_hook: req.after_run_hook,
@@ -557,6 +571,10 @@ mod tests {
                 prompt: "Do the task".into(),
                 working_dir: ".".into(),
                 model: "worker-model".into(),
+                worker_runner: WorkerRunnerSpec {
+                    runner: "pi".into(),
+                    extensions: vec!["autoresearch".into(), "goal".into()],
+                },
                 after_create_hook: None,
                 before_run_hook: None,
                 after_run_hook: None,
@@ -686,6 +704,10 @@ mod tests {
                 product: "thala-core".into(),
                 prompt: "Prompt".into(),
                 model: "worker-model".into(),
+                worker: crate::core::workflow::WorkerConfig {
+                    runner: crate::core::workflow::WorkerRunnerKind::Pi,
+                    extensions: vec!["autoresearch".into(), "goal".into()],
+                },
                 workspace_root: ".".into(),
                 remote_branch: Some("task/bd-123".into()),
                 callback_url: None,

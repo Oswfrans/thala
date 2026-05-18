@@ -24,6 +24,10 @@ function task(taskId: string, attempt = 1): StartTaskRequest {
       prompt: "Implement the task",
       working_dir: ".",
       model: "test-model",
+      worker_runner: {
+        runner: "pi",
+        extensions: ["autoresearch", "goal"],
+      },
     },
     execution_policy: {
       max_duration_seconds: 60,

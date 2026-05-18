@@ -2,7 +2,7 @@
 //!
 //! How it works:
 //!   1. `launch()` creates a git worktree, writes a prompt file, runs
-//!      after_create and before_run hooks, then spawns an opencode session in a
+//!      after_create and before_run hooks, then spawns a worker session in a
 //!      new tmux window.
 //!   2. `observe()` runs `tmux capture-pane` and hashes the output for stall detection.
 //!   3. `cancel()` kills the tmux session.
@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
+use crate::adapters::execution::runner::local_runner_script;
 use crate::core::error::ThalaError;
 use crate::core::run::{ExecutionBackendKind, RunObservation, WorkerHandle};
 use crate::ports::execution::{ExecutionBackend, LaunchRequest, LaunchedRun};
@@ -144,11 +145,46 @@ impl ExecutionBackend for LocalBackend {
         tokio::fs::write(&prompt_path, &req.prompt)
             .await
             .map_err(|e| ThalaError::backend("local", format!("Failed to write prompt: {e}")))?;
+        let prompt_path_arg = Self::path_arg(&prompt_path, "prompt")?;
+
+        let runner_script = worktree.join(".thala").join("run-worker.sh");
+        tokio::fs::write(&runner_script, local_runner_script(&req.worker)?)
+            .await
+            .map_err(|e| {
+                ThalaError::backend(
+                    "local",
+                    format!("Failed to write worker runner script: {e}"),
+                )
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut perms = tokio::fs::metadata(&runner_script)
+                .await
+                .map_err(|e| {
+                    ThalaError::backend(
+                        "local",
+                        format!("Failed to stat worker runner script: {e}"),
+                    )
+                })?
+                .permissions();
+            perms.set_mode(0o700);
+            tokio::fs::set_permissions(&runner_script, perms)
+                .await
+                .map_err(|e| {
+                    ThalaError::backend(
+                        "local",
+                        format!("Failed to chmod worker runner script: {e}"),
+                    )
+                })?;
+        }
+        let runner_script_arg = Self::path_arg(&runner_script, "runner script")?;
 
         Self::run_hook("after_create", req.after_create_hook.as_deref(), &worktree).await?;
         Self::run_hook("before_run", req.before_run_hook.as_deref(), &worktree).await?;
 
-        // Spawn opencode in a new tmux session.
+        // Spawn the configured runner in a new tmux session.
         let status = tokio::process::Command::new("tmux")
             .args([
                 "new-session",
@@ -157,13 +193,10 @@ impl ExecutionBackend for LocalBackend {
                 &session,
                 "-c",
                 worktree_arg,
-                "opencode",
-                "--model",
-                &req.model,
-                "--no-session",
-                "-p",
-                &req.prompt,
+                runner_script_arg,
             ])
+            .env("THALA_MODEL", &req.model)
+            .env("THALA_PROMPT_PATH", prompt_path_arg)
             .status()
             .await
             .map_err(|e| ThalaError::backend("local", format!("tmux new-session failed: {e}")))?;

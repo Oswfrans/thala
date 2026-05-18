@@ -10,6 +10,7 @@ use async_trait::async_trait;
 
 use crate::core::error::ThalaError;
 use crate::core::run::{ExecutionBackendKind, RunObservation, WorkerHandle};
+use crate::core::workflow::WorkerConfig;
 
 // ── LaunchRequest ─────────────────────────────────────────────────────────────
 
@@ -33,6 +34,9 @@ pub struct LaunchRequest {
 
     /// Model string passed to the worker (e.g. "openrouter/moonshotai/kimi-k2.5").
     pub model: String,
+
+    /// Worker CLI runner and runner extension configuration.
+    pub worker: WorkerConfig,
 
     /// Absolute path to the workspace root on the Thala host.
     pub workspace_root: PathBuf,
@@ -59,14 +63,14 @@ pub struct LaunchRequest {
 
     // ── Lifecycle hooks forwarded to remote workers ───────────────────────────
     /// Trusted WORKFLOW.md shell snippet run after the worktree/clone is ready,
-    /// before OpenCode starts. Non-zero exits fail the run.
+    /// before the worker starts. Non-zero exits fail the run.
     pub after_create_hook: Option<String>,
 
-    /// Trusted WORKFLOW.md shell snippet run in the worktree before OpenCode
+    /// Trusted WORKFLOW.md shell snippet run in the worktree before the worker
     /// starts. Non-zero exits fail the run.
     pub before_run_hook: Option<String>,
 
-    /// Trusted WORKFLOW.md shell snippet run after OpenCode exits, before the
+    /// Trusted WORKFLOW.md shell snippet run after the worker exits, before the
     /// callback is sent. Non-zero exits fail the run.
     pub after_run_hook: Option<String>,
 }

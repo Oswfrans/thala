@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use thala::adapters::execution::cloudflare::{CloudflareBackend, CloudflareConfig};
 use thala::adapters::execution::modal::{ModalBackend, ModalConfig};
 use thala::core::run::ExecutionBackendKind;
+use thala::core::workflow::{WorkerConfig, WorkerRunnerKind};
 use thala::ports::execution::{ExecutionBackend, LaunchRequest};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -32,6 +33,10 @@ async fn modal_backend_live_launch_and_observe() {
         product: "test-app".into(),
         prompt: "Test prompt".into(),
         model: "claude-sonnet".into(),
+        worker: WorkerConfig {
+            runner: WorkerRunnerKind::Pi,
+            extensions: vec!["autoresearch".into(), "goal".into()],
+        },
         workspace_root: PathBuf::from("/tmp/test-workspace"),
         remote_branch: Some("test-branch".into()),
         callback_url: Some("http://localhost:8080/callback".into()),
@@ -82,6 +87,10 @@ async fn cloudflare_backend_live_launch_observe_cancel() {
         product: "test-app".into(),
         prompt: "Test prompt for Cloudflare".into(),
         model: "claude-sonnet".into(),
+        worker: WorkerConfig {
+            runner: WorkerRunnerKind::Pi,
+            extensions: vec!["autoresearch".into(), "goal".into()],
+        },
         workspace_root: PathBuf::from("/tmp/test-workspace"),
         remote_branch: Some("cf-test-branch".into()),
         callback_url: Some("http://localhost:8080/callback".into()),

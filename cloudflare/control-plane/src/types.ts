@@ -29,9 +29,15 @@ export interface InstructionSpec {
   prompt: string;
   working_dir: string;
   model: string;
+  worker_runner: WorkerRunnerSpec;
   after_create_hook?: string;
   before_run_hook?: string;
   after_run_hook?: string;
+}
+
+export interface WorkerRunnerSpec {
+  runner: "pi" | "opencode";
+  extensions: string[];
 }
 
 export interface ExecutionPolicy {

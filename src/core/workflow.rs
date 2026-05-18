@@ -32,6 +32,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub models: ModelConfig,
 
+    /// Worker CLI runner selection and runner-specific options.
+    #[serde(default)]
+    pub worker: WorkerConfig,
+
     /// Retry and reroute policy.
     #[serde(default)]
     pub retry: RetryPolicy,
@@ -77,6 +81,14 @@ impl WorkflowConfig {
     pub fn from_markdown(content: &str) -> Result<Self, serde_yaml::Error> {
         let yaml = extract_front_matter(content);
         serde_yaml::from_str(yaml)
+    }
+
+    pub fn worker_runner_config(&self) -> WorkerConfig {
+        let mut config = self.worker.clone();
+        if let Some(runner) = self.execution.worker_runner {
+            config.runner = runner;
+        }
+        config
     }
 }
 
@@ -178,6 +190,11 @@ pub struct ExecutionConfig {
     /// Defaults to the current working directory.
     #[serde(default = "default_workspace_root")]
     pub workspace_root: String,
+
+    /// Compatibility alias for older/newly-written workflows that placed the
+    /// runner selector under `execution`. Prefer top-level `worker.runner`.
+    #[serde(default)]
+    pub worker_runner: Option<WorkerRunnerKind>,
 }
 
 fn default_backend() -> ExecutionBackendKind {
@@ -199,8 +216,101 @@ impl Default for ExecutionConfig {
             callback_base_url: None,
             github_token_env: default_github_token_env(),
             workspace_root: default_workspace_root(),
+            worker_runner: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkerConfig {
+    /// Worker CLI runner used inside the selected execution backend.
+    #[serde(default)]
+    pub runner: WorkerRunnerKind,
+
+    /// Runner extension package identifiers enabled before execution.
+    #[serde(
+        default = "default_worker_extensions",
+        deserialize_with = "deserialize_extensions"
+    )]
+    pub extensions: Vec<String>,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            runner: WorkerRunnerKind::default(),
+            extensions: default_worker_extensions(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkerRunnerKind {
+    #[default]
+    Pi,
+    Opencode,
+}
+
+impl WorkerRunnerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pi => "pi",
+            Self::Opencode => "opencode",
+        }
+    }
+
+    pub fn binary(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+fn default_worker_extensions() -> Vec<String> {
+    vec!["autoresearch".into(), "goal".into()]
+}
+
+fn deserialize_extensions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let extensions = Vec::<String>::deserialize(deserializer)?;
+    for extension in &extensions {
+        if !is_valid_extension_name(extension) {
+            return Err(serde::de::Error::custom(format!(
+                "unsafe worker extension name `{extension}`"
+            )));
+        }
+    }
+    Ok(extensions)
+}
+
+pub fn is_valid_extension_name(value: &str) -> bool {
+    if value.is_empty() || value.len() > 214 {
+        return false;
+    }
+
+    let segments: Vec<&str> = if let Some(scoped) = value.strip_prefix('@') {
+        let Some((scope, name)) = scoped.split_once('/') else {
+            return false;
+        };
+        vec![scope, name]
+    } else {
+        if value.contains('/') {
+            return false;
+        }
+        vec![value]
+    };
+
+    segments.into_iter().all(is_valid_package_segment)
+}
+
+fn is_valid_package_segment(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphanumeric()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

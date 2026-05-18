@@ -21,11 +21,11 @@ For the local backend, let Thala install/check the host tools and authenticate w
 bash dev/setup.sh
 bd --help
 gh auth status
-opencode --help
+pi --help
 tmux -V
 ```
 
-`dev/setup.sh` installs `bd` and `opencode` when missing. `bd` is the supported tracker. `gh` is used to open PRs and check CI. `opencode` runs the worker inside a tmux session.
+`dev/setup.sh` installs `bd` and checks local worker tools. `bd` is the supported tracker. `gh` is used to open PRs and check CI. Pi is the default worker runner inside a tmux session; OpenCode remains available by setting `worker.runner: opencode` in `WORKFLOW.md`.
 
 ## 3. Initialize Your Product Repo
 
@@ -53,7 +53,7 @@ From the Thala repo:
 ./target/release/thala onboard
 ```
 
-Choose the local backend for the simplest path. The wizard can install missing `bd`/`opencode`, initialize `.beads/`, write `WORKFLOW.md`, and print the exact next commands.
+Choose the local backend for the simplest path. The wizard can initialize `.beads/`, write a Pi-based `WORKFLOW.md`, and print the exact next commands.
 
 Validate it with the global `--workflow` flag before the subcommand:
 

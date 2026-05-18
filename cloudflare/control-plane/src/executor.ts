@@ -95,7 +95,7 @@ export class SandboxExecutor implements Executor {
         "/workspace/thala-runner.sh run-agent",
         task,
         WORKSPACE,
-        "opencode worker",
+        `${task.instruction.worker_runner.runner} worker`,
       );
 
       await this.ensureNotCancelled();
@@ -222,6 +222,8 @@ export class SandboxExecutor implements Executor {
         THALA_REPO_NAME: task.repo.name,
         THALA_REPO_BRANCH: task.repo.branch,
         THALA_MODEL: task.instruction.model,
+        THALA_WORKER_RUNNER: task.instruction.worker_runner.runner,
+        THALA_WORKER_EXTENSIONS: task.instruction.worker_runner.extensions.join(","),
         THALA_WORKDIR: task.instruction.working_dir || ".",
         THALA_MAX_DURATION_SECONDS: String(task.execution_policy.max_duration_seconds),
         THALA_AFTER_CREATE_HOOK: task.instruction.after_create_hook ?? "",
@@ -326,12 +328,41 @@ case "\${1:-}" in
       echo "Network-disabled execution is not implemented for Cloudflare Sandbox yet" >&2
       exit 2
     fi
-    if command -v opencode >/dev/null 2>&1; then
-      run_timed opencode --model "$THALA_MODEL" --no-session -p "$(cat "$prompt_path")"
-    else
-      echo "opencode binary not found in sandbox image" >&2
-      exit 127
-    fi
+    case "\${THALA_WORKER_RUNNER:-pi}" in
+      pi)
+        if ! command -v pi >/dev/null 2>&1; then
+          echo "pi binary not found in sandbox image" >&2
+          exit 127
+        fi
+        IFS=',' read -r -a extensions <<< "\${THALA_WORKER_EXTENSIONS:-}"
+        for extension in "\${extensions[@]}"; do
+          [ -z "$extension" ] && continue
+          if [[ ! "$extension" =~ ^(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Unsafe Pi extension name: $extension" >&2
+            exit 2
+          fi
+          case "$extension" in
+            autoresearch) source="npm:pi-autoresearch" ;;
+            goal) source="npm:@narumitw/pi-goal" ;;
+            *) source="npm:$extension" ;;
+          esac
+          run_timed pi install "$source"
+        done
+        run_timed pi --model "$THALA_MODEL" --no-session -p "$(cat "$prompt_path")"
+        ;;
+      opencode)
+        if command -v opencode >/dev/null 2>&1; then
+          run_timed opencode --model "$THALA_MODEL" --no-session -p "$(cat "$prompt_path")"
+        else
+          echo "opencode binary not found in sandbox image" >&2
+          exit 127
+        fi
+        ;;
+      *)
+        echo "Unsupported worker runner: \${THALA_WORKER_RUNNER}" >&2
+        exit 2
+        ;;
+    esac
     ;;
   after-run)
     cd "$workspace"

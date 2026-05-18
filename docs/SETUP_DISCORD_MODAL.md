@@ -130,9 +130,15 @@ execution:
   callback_base_url: https://your-thala-server.example.com
 
 models:
-  worker: "opencode/kimi-k2.5"
+  worker: "openrouter/moonshotai/kimi-k2.5"
   manager: "anthropic/claude-opus-4-6"
   max_review_cycles: 2
+
+worker:
+  runner: pi
+  extensions:
+    - autoresearch
+    - goal
 
 limits:
   max_concurrent_runs: 3
@@ -220,7 +226,9 @@ export THALA_TASK_BRANCH="task/TEST-1"
 export THALA_GITHUB_REPO="your-org/my-app"
 export THALA_CALLBACK_URL="http://localhost:8788/callback"
 export THALA_RUN_TOKEN="test-token"
-export THALA_MODEL="opencode/kimi-k2.5"
+export THALA_MODEL="openrouter/moonshotai/kimi-k2.5"
+export THALA_WORKER_RUNNER="pi"
+export THALA_WORKER_EXTENSIONS="autoresearch,goal"
 export THALA_PROMPT_B64=$(echo -n "Write a test file" | base64)
 export GITHUB_TOKEN="$THALA_GITHUB_TOKEN"
 

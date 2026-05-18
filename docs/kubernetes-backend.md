@@ -15,8 +15,9 @@ result after the worker calls back.
 - `cleanup` is idempotent Pod deletion.
 
 The worker Pod uses the same remote worker contract as the callback-based
-backends. The image must contain `worker-entrypoint.sh`, `opencode`, `git`,
-`curl`, and `jq`. The repository includes a baseline worker image at
+backends. The image must contain `worker-entrypoint.sh`, `pi`, `opencode`, `git`,
+`curl`, and `jq`. Pi is the default worker runner; OpenCode is available with
+`worker.runner: opencode`. The repository includes a baseline worker image at
 `dev/docker/Dockerfile.worker`.
 
 ## WORKFLOW.md

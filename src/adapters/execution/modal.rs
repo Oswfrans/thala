@@ -28,6 +28,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::timeout;
 
+use crate::adapters::execution::runner::extension_env_value;
 use crate::core::error::ThalaError;
 use crate::core::run::{ExecutionBackendKind, RunObservation, WorkerHandle};
 use crate::ports::execution::{ExecutionBackend, LaunchRequest, LaunchedRun};
@@ -111,6 +112,7 @@ impl ExecutionBackend for ModalBackend {
         let github_token = req.github_token.as_deref().ok_or_else(|| {
             ThalaError::backend("modal", "github_token is required for Modal backend")
         })?;
+        let worker_extensions = extension_env_value(&req.worker)?;
 
         // Build the `modal run --detach` command.
         // --detach returns immediately with the app/call ID instead of streaming logs.
@@ -123,6 +125,8 @@ impl ExecutionBackend for ModalBackend {
             .env("THALA_TASK_ID", &req.task_id)
             .env("THALA_PROMPT_B64", base64_encode(&req.prompt))
             .env("THALA_MODEL", &req.model)
+            .env("THALA_WORKER_RUNNER", req.worker.runner.as_str())
+            .env("THALA_WORKER_EXTENSIONS", worker_extensions)
             .env("THALA_TASK_BRANCH", remote_branch)
             .env("THALA_CALLBACK_URL", callback_url)
             .env("THALA_GITHUB_REPO", github_repo)

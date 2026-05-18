@@ -2,17 +2,17 @@
 Thala Modal Worker
 ================
 
-This Modal app is called by Thala's ModalBackend to run OpenCode worker sessions
+This Modal app is called by Thala's ModalBackend to run worker sessions
 inside Modal serverless containers.
 
 Thala calls:
     modal run --detach infra/modal_worker.py::run_worker [--env KEY=VALUE ...]
 
 The function:
-1. Installs OpenCode from npm (or uses a pre-built image layer)
+1. Installs Pi/OpenCode from npm (or uses a pre-built image layer)
 2. Clones the public product repo at the task branch
 3. Reads the prompt from .thala/prompts/<task_id>.md
-4. Runs OpenCode with the task prompt
+4. Runs the configured worker runner with the task prompt
 5. Commits and pushes changes back to the task branch
 6. POSTs an authenticated completion callback to Thala
 
@@ -27,7 +27,9 @@ Required env vars (passed via --env or set in Modal secrets):
     THALA_GITHUB_REPO      "org/repo" of the product repo
     THALA_CALLBACK_URL     Thala callback endpoint
     THALA_RUN_TOKEN        Per-run bearer token for callback auth
-    THALA_MODEL            OpenCode model string
+    THALA_MODEL            worker model string
+    THALA_WORKER_RUNNER    pi | opencode
+    THALA_WORKER_EXTENSIONS comma-separated Pi package identifiers
     OPENROUTER_API_KEY   (or OPENAI_API_KEY / ANTHROPIC_API_KEY)
 
 Usage from WORKFLOW.md worker config:
@@ -53,7 +55,7 @@ from pathlib import Path
 import modal
 
 # ── Modal image ───────────────────────────────────────────────────────────────
-# Build a reusable image layer with OpenCode pre-installed.
+# Build a reusable image layer with worker CLIs pre-installed.
 # Uses the v2 image builder (faster, reproducible layer caching).
 # To enable v2 workspace-wide: modal.com/settings/image-config
 worker_image = (
@@ -62,7 +64,7 @@ worker_image = (
     .run_commands(
         "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -",
         "apt-get install -y nodejs",
-        "npm install -g opencode-ai@latest",
+        "npm install -g @earendil-works/pi-coding-agent@latest opencode-ai@latest",
     )
 )
 
@@ -75,6 +77,7 @@ worker_image = (
 _LOCAL_TASK_VARS = [
     "THALA_RUN_ID", "THALA_TASK_ID", "THALA_TASK_BRANCH", "THALA_GITHUB_REPO",
     "THALA_CALLBACK_URL", "THALA_RUN_TOKEN", "THALA_MODEL",
+    "THALA_WORKER_RUNNER", "THALA_WORKER_EXTENSIONS",
     "THALA_PROMPT_B64", "THALA_AFTER_CREATE_HOOK", "THALA_BEFORE_RUN_HOOK",
     "THALA_AFTER_RUN_HOOK", "GITHUB_TOKEN",
     "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
@@ -158,6 +161,72 @@ def _run_workflow_hook(hook_name: str, hook: str) -> int:
     return result.returncode
 
 
+def _valid_extension_name(extension: str) -> bool:
+    if not extension or len(extension) > 214:
+        return False
+    if extension.startswith("@"):
+        parts = extension[1:].split("/")
+        if len(parts) != 2:
+            return False
+    elif "/" in extension:
+        return False
+    else:
+        parts = [extension]
+    return all(
+        part
+        and part[0].isalnum()
+        and all(char.isalnum() or char in "._-" for char in part)
+        for part in parts
+    )
+
+
+def _extension_source(extension: str) -> str:
+    aliases = {
+        "autoresearch": "pi-autoresearch",
+        "goal": "@narumitw/pi-goal",
+    }
+    return f"npm:{aliases.get(extension, extension)}"
+
+
+def _run_worker_runner(runner: str, extensions: list[str], model: str, prompt: str) -> tuple[int, str]:
+    if runner == "pi":
+        for extension in extensions:
+            if not _valid_extension_name(extension):
+                return 2, f"Unsafe Pi extension name: {extension}"
+            install = subprocess.run(
+                ["pi", "install", _extension_source(extension)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env={**os.environ},
+            )
+            print(install.stdout or "", end="")
+            if install.returncode != 0:
+                return install.returncode, install.stdout or ""
+        result = subprocess.run(
+            ["pi", "--model", model, "--no-session", "-p", prompt],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ},
+        )
+    elif runner == "opencode":
+        result = subprocess.run(
+            ["opencode", "--model", model, "--no-session", "-p", prompt],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env={**os.environ},
+        )
+    else:
+        return 2, f"Unsupported worker runner: {runner}"
+
+    output = result.stdout or ""
+    if "ProviderModelNotFoundError" in output or "Model not found" in output:
+        return 1, output
+    return result.returncode, output
+
+
 @app.function(
     timeout=int(os.environ.get("THALA_WORKER_TIMEOUT_SECS", "3600")),
     secrets=[_task_secret],
@@ -182,6 +251,12 @@ def run_worker() -> int:
     callback_url = os.environ["THALA_CALLBACK_URL"]
     run_token = os.environ["THALA_RUN_TOKEN"]
     model = os.environ["THALA_MODEL"]
+    runner = os.environ.get("THALA_WORKER_RUNNER", "pi")
+    extensions = [
+        extension
+        for extension in os.environ.get("THALA_WORKER_EXTENSIONS", "autoresearch,goal").split(",")
+        if extension
+    ]
 
     after_create_hook = os.environ.get("THALA_AFTER_CREATE_HOOK", "")
     before_run_hook = os.environ.get("THALA_BEFORE_RUN_HOOK", "")
@@ -256,21 +331,11 @@ def run_worker() -> int:
         )
         return exit_code
 
-    # ── Run OpenCode ──────────────────────────────────────────────────────────
-    print(f"[thala-worker] Launching OpenCode (model={model})")
-    opencode_result = subprocess.run(
-        ["opencode", "run", "--model", model, prompt],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env={**os.environ},  # pass through API keys etc.
-    )
-    opencode_output = opencode_result.stdout or ""
-    print(opencode_output, end="")
-    exit_code = opencode_result.returncode
-    if "ProviderModelNotFoundError" in opencode_output or "Model not found" in opencode_output:
-        exit_code = 1
-    print(f"[thala-worker] OpenCode exited with code {exit_code}")
+    # ── Run worker ────────────────────────────────────────────────────────────
+    print(f"[thala-worker] Launching {runner} (model={model})")
+    exit_code, runner_output = _run_worker_runner(runner, extensions, model, prompt)
+    print(runner_output, end="")
+    print(f"[thala-worker] {runner} exited with code {exit_code}")
 
     if exit_code != 0:
         _send_callback(
@@ -280,7 +345,7 @@ def run_worker() -> int:
             task_id,
             "error",
             exit_code,
-            f"OpenCode exited with code {exit_code}",
+            f"{runner} exited with code {exit_code}",
         )
         return exit_code
 

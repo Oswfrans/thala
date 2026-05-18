@@ -1,6 +1,6 @@
 # Thala Worker Container
 #
-# Runs an OpenCode session for a single Thala task, commits and pushes the
+# Runs a configured worker session for a single Thala task, commits and pushes the
 # task branch, then POSTs a completion callback to Thala. Used by callback
 # based remote worker backends.
 #
@@ -14,7 +14,9 @@
 #   THALA_GITHUB_REPO      — "org/repo" of the product repo (e.g. "example/example-app")
 #   THALA_CALLBACK_URL     — full URL to POST completion result to
 #   THALA_RUN_TOKEN        — per-run bearer token for callback authentication
-#   THALA_MODEL            — OpenCode model string (e.g. "openrouter/kimi-k2.5")
+#   THALA_MODEL            — worker model string (e.g. "openrouter/kimi-k2.5")
+#   THALA_WORKER_RUNNER    — pi (default) or opencode
+#   THALA_WORKER_EXTENSIONS — comma-separated Pi package identifiers
 #   GITHUB_TOKEN           — optional token for private repos and branch push
 #   OPENROUTER_API_KEY     — (or OPENAI_API_KEY / ANTHROPIC_API_KEY) passed through
 
@@ -33,8 +35,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# ── OpenCode CLI ──────────────────────────────────────────────────────────────
-RUN npm install -g opencode-ai@latest
+# ── Worker CLIs ───────────────────────────────────────────────────────────────
+RUN npm install -g @earendil-works/pi-coding-agent@latest opencode-ai@latest
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 COPY docker/worker-entrypoint.sh /usr/local/bin/worker-entrypoint.sh

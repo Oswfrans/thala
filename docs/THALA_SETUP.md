@@ -29,7 +29,7 @@ for production.
 
 ## System dependencies
 
-Run `bash dev/setup.sh` to install/check the common tools. It installs `bd` when missing, and for the local backend it installs `opencode` when missing. For the local backend you need `git`, `bd`, `gh`, `tmux`, and `opencode` on PATH. Remote backends also need the credentials documented in their workflow blocks below.
+Run `bash dev/setup.sh` to install/check the common tools. It installs `bd` when missing. For the local backend you need `git`, `bd`, `gh`, `tmux`, and the configured worker runner on PATH. Pi is the default runner; install it with `curl -fsSL https://pi.dev/install.sh | sh` or `npm install -g @earendil-works/pi-coding-agent`. OpenCode remains supported with `worker.runner: opencode`. Remote backends also need the credentials documented in their workflow blocks below.
 
 ## Beads setup
 
@@ -78,9 +78,15 @@ hooks:
   before_cleanup: ""
 
 models:
-  worker: "opencode/kimi-k2.5"
+  worker: "openrouter/moonshotai/kimi-k2.5"
   manager: "anthropic/claude-opus-4-6"
   max_review_cycles: 2
+
+worker:
+  runner: pi
+  extensions:
+    - autoresearch
+    - goal
 
 limits:
   max_concurrent_runs: 2
@@ -129,6 +135,14 @@ and Cloudflare workers intentionally execute `after_create`, `before_run`, and
 `after_run` through a shell so normal shell composition works; a non-zero hook
 exit fails that launch or run phase. `before_cleanup` is accepted in workflow
 files for compatibility but is not executed by the current backends.
+
+To use OpenCode instead of the default Pi runner:
+
+```yaml
+worker:
+  runner: opencode
+  extensions: []
+```
 
 ## Remote backends
 

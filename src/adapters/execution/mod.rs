@@ -14,9 +14,11 @@ pub mod kubernetes;
 pub mod local;
 pub mod modal;
 pub mod router;
+pub mod runner;
 
 pub use cloudflare::{CloudflareBackend, CloudflareConfig};
 pub use kubernetes::{KubernetesBackend, KubernetesConfig};
 pub use local::LocalBackend;
 pub use modal::{ModalBackend, ModalConfig};
 pub use router::DefaultBackendRouter;
+pub use runner::{PromptSource, WorkerRunner, WorkerRunnerPlan};

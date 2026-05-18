@@ -9,6 +9,7 @@ use thala::adapters::execution::cloudflare::{CloudflareBackend, CloudflareConfig
 use thala::adapters::execution::kubernetes::{KubernetesBackend, KubernetesConfig, SecretKeyRef};
 use thala::adapters::execution::local::LocalBackend;
 use thala::adapters::execution::modal::{ModalBackend, ModalConfig};
+use thala::adapters::execution::runner::{PromptSource, WorkerRunner};
 use thala::adapters::validation::noop::NoopValidator;
 use thala::adapters::validation::review_ai::ReviewAiValidator;
 use thala::core::ids::{RunId, TaskId};
@@ -16,6 +17,7 @@ use thala::core::run::TaskRun;
 use thala::core::run::{ExecutionBackendKind, WorkerHandle};
 use thala::core::task::TaskSpec;
 use thala::core::validation::ValidatorKind;
+use thala::core::workflow::{WorkerConfig, WorkerRunnerKind};
 use thala::ports::execution::{ExecutionBackend, LaunchRequest};
 use thala::ports::validator::Validator;
 use wiremock::matchers::{method, path};
@@ -61,6 +63,10 @@ fn launch_request_for_backend() -> LaunchRequest {
         product: "test-product".into(),
         prompt: "Do the task".into(),
         model: "test-model".into(),
+        worker: WorkerConfig {
+            runner: WorkerRunnerKind::Pi,
+            extensions: vec!["autoresearch".into(), "goal".into()],
+        },
         workspace_root: std::path::PathBuf::from("/tmp/test-product"),
         remote_branch: Some("task/bd-test".into()),
         callback_url: None,
@@ -83,6 +89,82 @@ async fn local_backend_reports_correct_kind() {
     assert_eq!(backend.kind(), ExecutionBackendKind::Local);
     assert!(backend.is_local());
     assert_eq!(backend.name(), "local");
+}
+
+#[test]
+fn pi_runner_command_includes_prompt_model_and_default_extensions() {
+    let config = WorkerConfig::default();
+    let plan = WorkerRunner::plan(
+        &config,
+        "openrouter/test-model",
+        PromptSource::Inline("Do it"),
+    )
+    .unwrap();
+
+    assert_eq!(plan.runner, WorkerRunnerKind::Pi);
+    assert_eq!(plan.run.program, "pi");
+    assert_eq!(
+        plan.run.args,
+        vec![
+            "--model",
+            "openrouter/test-model",
+            "--no-session",
+            "-p",
+            "Do it"
+        ]
+    );
+    assert_eq!(plan.install_steps.len(), 2);
+    assert_eq!(
+        plan.install_steps[0].args,
+        vec!["install", "npm:pi-autoresearch"]
+    );
+    assert_eq!(
+        plan.install_steps[1].args,
+        vec!["install", "npm:@narumitw/pi-goal"]
+    );
+}
+
+#[test]
+fn pi_runner_includes_additional_extensions() {
+    let config = WorkerConfig {
+        runner: WorkerRunnerKind::Pi,
+        extensions: vec!["autoresearch".into(), "@scope/custom-pi".into()],
+    };
+    let plan = WorkerRunner::plan(&config, "model", PromptSource::Inline("prompt")).unwrap();
+
+    assert_eq!(plan.install_steps.len(), 2);
+    assert_eq!(
+        plan.install_steps[1].args,
+        vec!["install", "npm:@scope/custom-pi"]
+    );
+}
+
+#[test]
+fn opencode_runner_command_still_resolves() {
+    let config = WorkerConfig {
+        runner: WorkerRunnerKind::Opencode,
+        extensions: Vec::new(),
+    };
+    let plan = WorkerRunner::plan(&config, "model", PromptSource::Inline("prompt")).unwrap();
+
+    assert_eq!(plan.runner, WorkerRunnerKind::Opencode);
+    assert_eq!(plan.run.program, "opencode");
+    assert_eq!(
+        plan.run.args,
+        vec!["--model", "model", "--no-session", "-p", "prompt"]
+    );
+    assert!(plan.install_steps.is_empty());
+}
+
+#[test]
+fn runner_rejects_unsafe_extension_names() {
+    let config = WorkerConfig {
+        runner: WorkerRunnerKind::Pi,
+        extensions: vec!["ok".into(), "bad;touch".into()],
+    };
+    let err = WorkerRunner::plan(&config, "model", PromptSource::Inline("prompt")).unwrap_err();
+
+    assert!(err.to_string().contains("unsafe worker extension name"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

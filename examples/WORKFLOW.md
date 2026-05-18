@@ -14,8 +14,14 @@ execution:
   workspace_root: /workspaces/thala
   github_token_env: THALA_GITHUB_TOKEN
 
+worker:
+  runner: pi
+  extensions:
+    - autoresearch
+    - goal
+
 models:
-  worker: "opencode/kimi-k2.5"
+  worker: "openrouter/moonshotai/kimi-k2.5"
   manager: "anthropic/claude-opus-4-6"
   max_review_cycles: 2
 

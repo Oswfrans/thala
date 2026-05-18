@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
+use crate::adapters::execution::runner::extension_env_value;
 use crate::core::error::ThalaError;
 use crate::core::run::{ExecutionBackendKind, RunObservation, RunStatus, WorkerHandle};
 use crate::ports::execution::{ExecutionBackend, LaunchRequest, LaunchedRun};
@@ -264,6 +265,7 @@ impl KubernetesBackend {
                 "github_repo is required for Kubernetes backend",
             )
         })?;
+        let worker_extensions = extension_env_value(&req.worker)?;
 
         let pod_name = Self::pod_name(&req.product, &req.task_id, req.attempt);
         let mut env = vec![
@@ -274,6 +276,8 @@ impl KubernetesBackend {
             env_value("THALA_CALLBACK_URL", callback_url),
             env_value("THALA_RUN_TOKEN", callback_token),
             env_value("THALA_MODEL", &req.model),
+            env_value("THALA_WORKER_RUNNER", req.worker.runner.as_str()),
+            env_value("THALA_WORKER_EXTENSIONS", &worker_extensions),
             env_value("THALA_PROMPT_B64", &base64_encode(&req.prompt)),
         ];
 
@@ -853,6 +857,10 @@ mod tests {
             product: "demo-app".into(),
             prompt: "Do the task".into(),
             model: "opencode/test".into(),
+            worker: crate::core::workflow::WorkerConfig {
+                runner: crate::core::workflow::WorkerRunnerKind::Pi,
+                extensions: vec!["autoresearch".into(), "goal".into()],
+            },
             workspace_root: "/tmp/demo".into(),
             remote_branch: Some("task/bd-123".into()),
             callback_url: Some("https://thala.example.com/api/worker/callback".into()),
@@ -895,6 +903,19 @@ mod tests {
                 .find(|e| e["name"] == "GITHUB_TOKEN")
                 .unwrap()["valueFrom"]["secretKeyRef"]["name"],
             Value::String("git".into())
+        );
+        let env = pod["spec"]["containers"][0]["env"].as_array().unwrap();
+        assert_eq!(
+            env.iter()
+                .find(|e| e["name"] == "THALA_WORKER_RUNNER")
+                .unwrap()["value"],
+            Value::String("pi".into())
+        );
+        assert_eq!(
+            env.iter()
+                .find(|e| e["name"] == "THALA_WORKER_EXTENSIONS")
+                .unwrap()["value"],
+            Value::String("autoresearch,goal".into())
         );
     }
 

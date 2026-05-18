@@ -186,7 +186,7 @@ attempt it:
 4. Writes the rendered prompt to `/workspace/THALA_PROMPT.md`.
 5. Clones the task branch into `/workspace/task`.
 6. Runs `after_create`, `before_run`, and `after_run` hooks when present.
-7. Runs `opencode --model <model> --no-session -p <prompt>`.
+7. Runs the configured worker runner. Pi is the default and installs configured Pi packages before invoking `pi -p`; OpenCode is available with `worker.runner: opencode`.
 8. Commits changed files and pushes back to the task branch.
 9. Records the final commit SHA, or records that there were no changes.
 

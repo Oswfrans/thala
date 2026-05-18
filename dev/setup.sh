@@ -78,7 +78,7 @@ find_bin() {
         command -v "$bin"
         return 0
     fi
-    for loc in "$HOME/.opencode/bin/$bin" "$HOME/.local/bin/$bin" "$HOME/go/bin/$bin" "$HOME/.cargo/bin/$bin" "$HOME/.bun/bin/$bin"; do
+    for loc in "$HOME/.opencode/bin/$bin" "$HOME/.local/bin/$bin" "$HOME/go/bin/$bin" "$HOME/.cargo/bin/$bin" "$HOME/.bun/bin/$bin" "$HOME/.pi/bin/$bin"; do
         if [[ -x "$loc" ]]; then
             echo "$loc"
             return 0
@@ -140,6 +140,30 @@ install_opencode() {
     fi
 }
 
+install_pi() {
+    if find_bin pi >/dev/null; then
+        ok "pi found at $(find_bin pi)"
+        return 0
+    fi
+
+    step "Installing pi..."
+    local script="/tmp/thala-install-pi.sh"
+    curl -fsSL https://pi.dev/install.sh -o "$script"
+    bash "$script" || warn "Official pi installer failed; trying npm fallback"
+
+    if ! find_bin pi >/dev/null && command -v npm &>/dev/null; then
+        npm install -g @earendil-works/pi-coding-agent
+    fi
+
+    if find_bin pi >/dev/null; then
+        ok "pi installed at $(find_bin pi)"
+    else
+        fail "pi install failed"
+        info "Install manually with: curl -fsSL https://pi.dev/install.sh | sh"
+        return 1
+    fi
+}
+
 ensure_beads_workspace() {
     local root="$1"
     if [[ ! -d "$root" ]]; then
@@ -194,7 +218,7 @@ fi
 
 # ── 2. Backend-specific tools ─────────────────────────────────────────────────
 if [[ "$BACKEND" == "local" ]]; then
-    step "2. Local backend tools (tmux, opencode, bun, unzip)..."
+    step "2. Local backend tools (tmux, pi, bun, unzip)..."
 
     if ! command -v tmux &>/dev/null; then
         sudo apt-get install -y tmux && ok "tmux installed" || fail "tmux install failed"
@@ -215,7 +239,7 @@ if [[ "$BACKEND" == "local" ]]; then
         ok "bun already installed"
     fi
 
-    install_opencode
+    install_pi
 
 elif [[ "$BACKEND" == "opencode-zen" ]]; then
     step "2. OpenCode Zen backend tools..."
@@ -447,7 +471,8 @@ check_optional gcloud "GCP deployments will not work"
 case "$BACKEND" in
     local)
         check_required tmux
-        check_required opencode
+        check_required pi
+        check_optional opencode "OpenCode fallback will fail unless WORKFLOW.md uses worker.runner: pi"
         check_optional bun      "workspace hooks using bun will fail"
         ;;
     opencode-zen)

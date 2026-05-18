@@ -310,6 +310,20 @@ function validateStartTaskRequest(raw: unknown): StartTaskRequest {
   ) {
     throw new Error("instruction prompt, working_dir, and model are required");
   }
+  const workerRunner = instruction.worker_runner;
+  if (
+    !isRecord(workerRunner) ||
+    !["pi", "opencode"].includes(String(workerRunner.runner)) ||
+    !Array.isArray(workerRunner.extensions) ||
+    !workerRunner.extensions.every((extension) => typeof extension === "string")
+  ) {
+    throw new Error("instruction.worker_runner is invalid");
+  }
+  for (const extension of workerRunner.extensions) {
+    if (!isValidExtensionName(extension)) {
+      throw new Error(`unsafe worker extension name: ${extension}`);
+    }
+  }
   if (
     !isRecord(policy) ||
     typeof policy.max_duration_seconds !== "number" ||
@@ -323,6 +337,10 @@ function validateStartTaskRequest(raw: unknown): StartTaskRequest {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isValidExtensionName(value: string): boolean {
+  return /^(@[A-Za-z0-9][A-Za-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }
 
 function now(): string {
