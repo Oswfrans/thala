@@ -42,7 +42,7 @@ merge:
 discord:
   bot_token: "Bot ${DISCORD_BOT_TOKEN}"
   public_key: "9a953bdcbe2382bd7be71aaf22e4adaae46d7ce5c4bfeb5fb1947dc0b5a05297"
-  alerts_channel_id: "1291764435225600060"
+  alerts_channel_id: "1477706101746307145"
 
 hooks:
   after_create: ""
