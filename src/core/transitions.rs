@@ -229,6 +229,7 @@ pub fn apply_run_transition(
     #[allow(clippy::match_same_arms)]
     let next = match (&current, &transition) {
         (RunStatus::Launching, RunTransition::Activated) => RunStatus::Active,
+        (RunStatus::Launching, RunTransition::FailureSignaled { .. }) => RunStatus::Failed,
         (RunStatus::Launching, RunTransition::Cancelled) => RunStatus::Cancelled,
 
         (RunStatus::Active, RunTransition::CompletionSignaled) => RunStatus::Completed,

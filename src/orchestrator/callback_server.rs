@@ -5,6 +5,7 @@
 //! callbacks into normal run/task transitions plus orchestrator events.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::extract::DefaultBodyLimit;
@@ -196,7 +197,17 @@ async fn handle_worker_callback(
         return Err(CallbackError::bad_request("run does not belong to task"));
     }
 
+    let expected_hash = run
+        .callback_token_hash
+        .as_deref()
+        .ok_or_else(|| CallbackError::unauthorized("run does not accept callbacks"))?;
+
+    if !constant_time_eq(token_hash.as_bytes(), expected_hash.as_bytes()) {
+        return Err(CallbackError::unauthorized("invalid callback token"));
+    }
+
     if let Some(report_artifact) = payload.report_artifact.as_deref() {
+        validate_report_artifact_path(report_artifact).map_err(CallbackError::bad_request)?;
         if let Some(mut research_run) = state
             .store
             .research_run_for_worker(&run_id)
@@ -210,15 +221,6 @@ async fn handle_worker_callback(
                 .await
                 .map_err(storage_error)?;
         }
-    }
-
-    let expected_hash = run
-        .callback_token_hash
-        .as_deref()
-        .ok_or_else(|| CallbackError::unauthorized("run does not accept callbacks"))?;
-
-    if !constant_time_eq(token_hash.as_bytes(), expected_hash.as_bytes()) {
-        return Err(CallbackError::unauthorized("invalid callback token"));
     }
 
     if run.status.is_terminal() {
@@ -370,6 +372,20 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
+fn validate_report_artifact_path(path: &str) -> Result<(), String> {
+    let path = Path::new(path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(
+            "research report artifact path must be relative and stay inside workspace".into(),
+        );
+    }
+    Ok(())
+}
+
 fn storage_error(err: crate::core::error::ThalaError) -> CallbackError {
     CallbackError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }
@@ -385,6 +401,8 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::adapters::state::SqliteStateStore;
+    use crate::core::goal::{ResearchRun, ResearchRunStatus};
+    use crate::core::ids::GoalId;
     use crate::core::ids::RunId;
     use crate::core::run::{ExecutionBackendKind, TaskRun};
     use crate::core::task::{TaskRecord, TaskSpec, TaskStatus};
@@ -517,6 +535,82 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn invalid_callback_token_cannot_update_research_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStateStore::open(tmp.path().join("state.db")).unwrap());
+        let (events_tx, _events_rx) = mpsc::channel(4);
+        let state = CallbackState {
+            store: store.clone(),
+            events_tx,
+        };
+
+        let task_id = TaskId::new("bd-callback-research");
+        let run_id = RunId::from("run-callback-research");
+        let goal_id = GoalId::new("goal-callback-research");
+        let mut record = TaskRecord::new(task_spec(task_id.as_str()));
+        record.status = TaskStatus::Running;
+        record.active_run_id = Some(run_id.clone());
+        store.upsert_task(&record).await.unwrap();
+
+        let mut run = TaskRun::new(
+            run_id.clone(),
+            task_id.clone(),
+            1,
+            ExecutionBackendKind::Modal,
+        );
+        run.status = RunStatus::Active;
+        run.callback_token_hash = Some(sha256_hex(b"secret-token"));
+        store.upsert_run(&run).await.unwrap();
+        store
+            .upsert_research_run(&ResearchRun {
+                research_run_id: RunId::new_v4(),
+                goal_id: goal_id.clone(),
+                source_task_id: task_id.clone(),
+                child_task_id: task_id.clone(),
+                variant_name: "risk-scan".into(),
+                prompt: "research".into(),
+                backend: ExecutionBackendKind::Modal,
+                worker_run_id: run_id.clone(),
+                status: ResearchRunStatus::Running,
+                report_artifact: Some(".thala/research/original.json".into()),
+            })
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer wrong-token"),
+        );
+
+        let err = handle_worker_callback(
+            &state,
+            &headers,
+            WorkerCallbackPayload {
+                task_id: task_id.to_string(),
+                run_id: Some(run_id.to_string()),
+                status: "success".into(),
+                exit_code: Some(0),
+                error_message: None,
+                report_artifact: Some(".thala/research/poisoned.json".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        let research = store
+            .research_run_for_worker(&run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            research.report_artifact.as_deref(),
+            Some(".thala/research/original.json")
+        );
     }
 
     #[tokio::test]

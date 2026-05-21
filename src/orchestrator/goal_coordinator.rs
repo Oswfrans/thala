@@ -20,7 +20,7 @@ use crate::core::goal::{
 use crate::core::ids::{GoalId, RunId, TaskId};
 use crate::core::run::TaskRun;
 use crate::core::task::{TaskRecord, TaskSpec, TaskStatus};
-use crate::core::transitions::{apply_transition, Transition};
+use crate::core::transitions::{apply_run_transition, apply_transition, RunTransition, Transition};
 use crate::core::workflow::WorkflowConfig;
 use crate::ports::backend_router::BackendRouter;
 use crate::ports::execution::LaunchRequest;
@@ -49,6 +49,7 @@ pub struct GoalCoordinator {
     router: Arc<dyn BackendRouter>,
     repo: Arc<dyn RepoProvider>,
     events_tx: mpsc::Sender<OrchestratorEvent>,
+    synthesis_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl GoalCoordinator {
@@ -71,6 +72,7 @@ impl GoalCoordinator {
             router,
             repo,
             events_tx,
+            synthesis_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -294,6 +296,20 @@ impl GoalCoordinator {
 
             self.store.upsert_run(&task_run).await?;
 
+            let mut research_run = ResearchRun {
+                research_run_id: RunId::new_v4(),
+                goal_id: goal.goal_id.clone(),
+                source_task_id: spec.id.clone(),
+                child_task_id: child_task_id.clone(),
+                variant_name: variant.clone(),
+                prompt: prompt.clone(),
+                backend: backend_kind.clone(),
+                worker_run_id: worker_run_id.clone(),
+                status: ResearchRunStatus::Running,
+                report_artifact: Some(report_artifact),
+            };
+            self.store.upsert_research_run(&research_run).await?;
+
             let mut worker = self.workflow.worker_runner_config();
             worker.extensions = self.workflow.goals.worker_extensions.clone();
             for extension in spec.requested_worker_extensions() {
@@ -322,7 +338,28 @@ impl GoalCoordinator {
                 after_run_hook: self.workflow.hooks.after_run.clone(),
             };
 
-            let launched = backend.launch(req).await?;
+            let launched = match backend.launch(req).await {
+                Ok(launched) => launched,
+                Err(e) => {
+                    let reason = format!("backend launch failed: {e}");
+                    let failed_run = apply_run_transition(
+                        &task_run,
+                        RunTransition::FailureSignaled {
+                            reason: reason.clone(),
+                        },
+                    )?;
+                    self.store.upsert_run(&failed_run).await?;
+                    research_run.status = ResearchRunStatus::Failed;
+                    self.store.upsert_research_run(&research_run).await?;
+                    self.fail_goal_launch(&goal, &spec, &reason).await?;
+                    return Err(e.into());
+                }
+            };
+            task_run = self
+                .store
+                .get_run(&worker_run_id)
+                .await?
+                .unwrap_or(task_run);
             task_run.handle = Some(launched.handle);
             task_run.worktree_path = launched
                 .worktree_path
@@ -331,20 +368,6 @@ impl GoalCoordinator {
                 task_run.remote_branch = Some(branch);
             }
             self.store.upsert_run(&task_run).await?;
-
-            let research_run = ResearchRun {
-                research_run_id: RunId::new_v4(),
-                goal_id: goal.goal_id.clone(),
-                source_task_id: spec.id.clone(),
-                child_task_id,
-                variant_name: variant.clone(),
-                prompt,
-                backend: backend_kind.clone(),
-                worker_run_id: worker_run_id.clone(),
-                status: ResearchRunStatus::Running,
-                report_artifact: Some(report_artifact),
-            };
-            self.store.upsert_research_run(&research_run).await?;
 
             let _ = self
                 .events_tx
@@ -371,6 +394,45 @@ impl GoalCoordinator {
         Ok(())
     }
 
+    async fn fail_goal_launch(
+        &self,
+        goal: &GoalRecord,
+        spec: &TaskSpec,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        let mut failed_goal = goal.clone();
+        failed_goal.status = GoalStatus::Failed;
+        failed_goal.touch();
+        self.store.upsert_goal(&failed_goal).await?;
+
+        if let Some(record) = self.store.get_task(&spec.id).await? {
+            if record.status == TaskStatus::Dispatching {
+                let failed = apply_transition(
+                    &record,
+                    Transition::DispatchFailed {
+                        reason: reason.to_string(),
+                    },
+                )?;
+                self.store.upsert_task(&failed).await?;
+            }
+        }
+
+        if let Err(e) = self.sink.mark_stuck(spec.id.as_str(), reason).await {
+            tracing::warn!(task_id = %spec.id, "Failed to update failed goal task in Beads: {e}");
+        }
+
+        let _ = self
+            .events_tx
+            .send(OrchestratorEvent::GoalFailed {
+                goal_id: goal.goal_id.clone(),
+                reason: reason.to_string(),
+                at: chrono::Utc::now(),
+            })
+            .await;
+
+        Ok(())
+    }
+
     async fn report_artifact_for(
         &self,
         research_run: &ResearchRun,
@@ -392,6 +454,7 @@ impl GoalCoordinator {
     }
 
     async fn synthesize_if_ready(&self, goal_id: &GoalId) -> anyhow::Result<()> {
+        let _guard = self.synthesis_lock.lock().await;
         let runs = self.store.research_runs_for_goal(goal_id).await?;
         if runs.is_empty()
             || runs
@@ -404,6 +467,9 @@ impl GoalCoordinator {
         let Some(mut goal) = self.store.get_goal(goal_id).await? else {
             return Ok(());
         };
+        if goal.status != GoalStatus::Researching {
+            return Ok(());
+        }
         goal.status = GoalStatus::Synthesizing;
         goal.touch();
         self.store.upsert_goal(&goal).await?;

@@ -487,6 +487,20 @@ fn run_launching_to_cancelled_is_legal() {
 }
 
 #[test]
+fn run_launching_to_failed_is_legal_for_launch_failures() {
+    let run = make_run("bd-0101-failed", 1);
+    let updated = apply_run_transition(
+        &run,
+        RunTransition::FailureSignaled {
+            reason: "backend launch failed".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(updated.status, RunStatus::Failed);
+    assert!(updated.completed_at.is_some());
+}
+
+#[test]
 fn run_active_to_completed_is_legal() {
     let mut run = make_run("bd-0102", 1);
     run.status = RunStatus::Active;
@@ -569,17 +583,6 @@ fn run_illegal_transitions_are_rejected() {
     // Launching cannot go directly to Completed
     let run = make_run("bd-0111", 1);
     let err = apply_run_transition(&run, RunTransition::CompletionSignaled).unwrap_err();
-    assert!(matches!(err, StateError::IllegalRunTransition { .. }));
-
-    // Launching cannot go directly to Failed
-    let run = make_run("bd-0112", 1);
-    let err = apply_run_transition(
-        &run,
-        RunTransition::FailureSignaled {
-            reason: "crash".into(),
-        },
-    )
-    .unwrap_err();
     assert!(matches!(err, StateError::IllegalRunTransition { .. }));
 }
 
