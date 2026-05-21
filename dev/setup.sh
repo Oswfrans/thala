@@ -20,6 +20,19 @@ fail() { echo -e "${RED}✗${NC} $*"; }
 step() { echo -e "\n${BOLD}$*${NC}"; }
 info() { echo -e "${CYAN}→${NC} $*"; }
 
+# Run a command with elevated privileges when needed.
+# If already root, runs directly. If sudo is available, runs via sudo.
+# Otherwise runs directly (which may fail if privileges are required).
+run_with_priv() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    elif command -v sudo &>/dev/null; then
+        sudo "$@"
+    else
+        "$@"
+    fi
+}
+
 # ── Parse args ────────────────────────────────────────────────────────────────
 BACKEND="local"
 CONFIGURE=false
@@ -100,7 +113,7 @@ install_bd() {
     fi
 
     if command -v apt-get &>/dev/null; then
-        sudo apt-get install -y curl ca-certificates libicu-dev libzstd-dev || warn "Could not install optional Beads build dependencies"
+        run_with_priv apt-get install -y curl ca-certificates libicu-dev libzstd-dev || warn "Could not install optional Beads build dependencies"
     fi
 
     local script="/tmp/thala-install-beads.sh"
@@ -195,7 +208,7 @@ set_service_env() {
 step "1. Common system packages (git, bd, gh, gcloud)..."
 
 if ! command -v git &>/dev/null; then
-    sudo apt-get install -y git && ok "git installed" || fail "git install failed"
+    run_with_priv apt-get install -y git && ok "git installed" || fail "git install failed"
 else
     ok "git found at $(command -v git)"
 fi
@@ -221,13 +234,13 @@ if [[ "$BACKEND" == "local" ]]; then
     step "2. Local backend tools (tmux, pi, bun, unzip)..."
 
     if ! command -v tmux &>/dev/null; then
-        sudo apt-get install -y tmux && ok "tmux installed" || fail "tmux install failed"
+        run_with_priv apt-get install -y tmux && ok "tmux installed" || fail "tmux install failed"
     else
         ok "tmux found at $(command -v tmux)"
     fi
 
     if ! command -v unzip &>/dev/null; then
-        sudo apt-get install -y unzip && ok "unzip installed" || fail "unzip install failed"
+        run_with_priv apt-get install -y unzip && ok "unzip installed" || fail "unzip install failed"
     else
         ok "unzip already installed"
     fi

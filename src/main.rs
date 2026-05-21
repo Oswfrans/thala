@@ -29,6 +29,7 @@ use thala::core::workflow::{WorkerRunnerKind, WorkflowConfig};
 use thala::onboard_wizard::run_enhanced_onboard;
 use thala::orchestrator::dispatcher::DispatcherConfig;
 use thala::orchestrator::engine::{EngineConfig, OrchestratorEngine};
+use thala::orchestrator::goal_coordinator::GoalCoordinatorConfig;
 use thala::orchestrator::human_loop::HumanLoopConfig;
 use thala::orchestrator::monitor::MonitorConfig;
 use thala::orchestrator::prompt_builder::extract_template_body;
@@ -291,13 +292,20 @@ async fn main() -> Result<()> {
                 }
             },
         },
+        goal_coordinator: GoalCoordinatorConfig {
+            workspace_root: workspace_root.clone(),
+            product: workflow.product.clone(),
+        },
     };
 
     // ── Start Discord webhook server (if configured) ──────────────────────────
 
     let mut discord_webhook_handle: Option<tokio::task::JoinHandle<()>> = None;
-    if workflow.discord.is_some() && (discord_intake.is_some() || discord_interaction.is_some()) {
-        let discord_cfg = workflow.discord.as_ref().expect("checked above");
+    if let Some(discord_cfg) = workflow
+        .discord
+        .as_ref()
+        .filter(|_| discord_intake.is_some() || discord_interaction.is_some())
+    {
         let bind_addr = std::env::var("THALA_DISCORD_BIND")
             .ok()
             .map(|raw| {
@@ -547,11 +555,38 @@ fn install_tmux() -> Result<()> {
     }
     if find_binary("apt-get").is_some() {
         println!("Installing tmux with apt-get ...");
-        if run_status("sudo", &["apt-get", "install", "-y", "tmux"])? {
+        if run_elevated("apt-get", &["install", "-y", "tmux"])? {
             return Ok(());
         }
     }
     anyhow::bail!("tmux is missing and could not be installed automatically")
+}
+
+/// Run a command with elevated privileges if needed.
+/// If already running as root, invokes the command directly.
+/// If not root and `sudo` is available, invokes via sudo.
+/// Otherwise invokes the command directly (which may fail if privileges are required).
+fn run_elevated(program: &str, args: &[&str]) -> Result<bool> {
+    if is_root() {
+        run_status(program, args)
+    } else if find_binary("sudo").is_some() {
+        let mut sudo_args = vec![program];
+        sudo_args.extend(args);
+        run_status("sudo", &sudo_args)
+    } else {
+        run_status(program, args)
+    }
+}
+
+fn is_root() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::getuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 fn download_script(url: &str, name: &str) -> Result<PathBuf> {
