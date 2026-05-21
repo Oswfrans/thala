@@ -53,6 +53,22 @@ impl TaskSpec {
     pub fn is_dispatchable(&self) -> bool {
         !self.acceptance_criteria.trim().is_empty()
     }
+
+    /// Goal mode is explicit task metadata. Normal tasks must remain the default.
+    pub fn is_goal_mode(&self) -> bool {
+        self.labels.iter().any(|label| label == "mode:goal")
+    }
+
+    /// Task-level worker extension opt-in. Labels use
+    /// `worker-extension:<package-or-alias>`.
+    pub fn requested_worker_extensions(&self) -> Vec<String> {
+        self.labels
+            .iter()
+            .filter_map(|label| label.strip_prefix("worker-extension:"))
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .collect()
+    }
 }
 
 // ── TaskRecord ────────────────────────────────────────────────────────────────

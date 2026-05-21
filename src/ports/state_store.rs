@@ -8,7 +8,8 @@
 use async_trait::async_trait;
 
 use crate::core::error::ThalaError;
-use crate::core::ids::{InteractionId, RunId, TaskId};
+use crate::core::goal::{GoalRecord, ResearchRun};
+use crate::core::ids::{GoalId, InteractionId, RunId, TaskId};
 use crate::core::interaction::{InteractionResolution, InteractionTicket};
 use crate::core::run::TaskRun;
 use crate::core::task::TaskRecord;
@@ -35,6 +36,35 @@ pub trait StateStore: Send + Sync {
 
     /// Fetch all task records (active and terminal).
     async fn all_tasks(&self) -> Result<Vec<TaskRecord>, ThalaError>;
+
+    // ── Goal records ─────────────────────────────────────────────────────────
+
+    /// Insert or update a goal record.
+    async fn upsert_goal(&self, record: &GoalRecord) -> Result<(), ThalaError>;
+
+    /// Fetch a goal record by ID.
+    async fn get_goal(&self, goal_id: &GoalId) -> Result<Option<GoalRecord>, ThalaError>;
+
+    /// Fetch a goal record by its source Beads task ID.
+    async fn goal_for_task(&self, task_id: &TaskId) -> Result<Option<GoalRecord>, ThalaError>;
+
+    /// Fetch all non-terminal goals.
+    async fn active_goals(&self) -> Result<Vec<GoalRecord>, ThalaError>;
+
+    /// Insert or update a child research run record.
+    async fn upsert_research_run(&self, run: &ResearchRun) -> Result<(), ThalaError>;
+
+    /// Fetch all research runs for a goal.
+    async fn research_runs_for_goal(
+        &self,
+        goal_id: &GoalId,
+    ) -> Result<Vec<ResearchRun>, ThalaError>;
+
+    /// Fetch the research record that owns a worker run.
+    async fn research_run_for_worker(
+        &self,
+        worker_run_id: &RunId,
+    ) -> Result<Option<ResearchRun>, ThalaError>;
 
     // ── Run records ───────────────────────────────────────────────────────────
 

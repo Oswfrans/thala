@@ -98,6 +98,10 @@ struct WorkerCallbackPayload {
     exit_code: Option<i32>,
     #[serde(default)]
     error_message: Option<String>,
+    /// Optional structured artifact path for non-PR workflows such as goal
+    /// research fanout.
+    #[serde(default)]
+    report_artifact: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,15 +171,18 @@ async fn handle_worker_callback(
         .store
         .get_task(&task_id)
         .await
-        .map_err(storage_error)?
-        .ok_or_else(|| CallbackError::not_found("task not found"))?;
+        .map_err(storage_error)?;
 
     let run_id = payload
         .run_id
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .map(RunId::from)
-        .or_else(|| record.active_run_id.clone())
+        .or_else(|| {
+            record
+                .as_ref()
+                .and_then(|record| record.active_run_id.clone())
+        })
         .ok_or_else(|| CallbackError::bad_request("run_id missing and task has no active run"))?;
 
     let mut run = state
@@ -187,6 +194,22 @@ async fn handle_worker_callback(
 
     if run.task_id != task_id {
         return Err(CallbackError::bad_request("run does not belong to task"));
+    }
+
+    if let Some(report_artifact) = payload.report_artifact.as_deref() {
+        if let Some(mut research_run) = state
+            .store
+            .research_run_for_worker(&run_id)
+            .await
+            .map_err(storage_error)?
+        {
+            research_run.report_artifact = Some(report_artifact.to_string());
+            state
+                .store
+                .upsert_research_run(&research_run)
+                .await
+                .map_err(storage_error)?;
+        }
     }
 
     let expected_hash = run
@@ -422,6 +445,7 @@ mod tests {
                 status: "success".into(),
                 exit_code: Some(0),
                 error_message: None,
+                report_artifact: None,
             },
         )
         .await
@@ -486,6 +510,7 @@ mod tests {
                 status: "success".into(),
                 exit_code: Some(0),
                 error_message: None,
+                report_artifact: None,
             },
         )
         .await
@@ -536,6 +561,7 @@ mod tests {
                 status: "success".into(),
                 exit_code: Some(0),
                 error_message: None,
+                report_artifact: None,
             },
         )
         .await

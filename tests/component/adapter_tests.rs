@@ -92,7 +92,7 @@ async fn local_backend_reports_correct_kind() {
 }
 
 #[test]
-fn pi_runner_command_includes_prompt_model_and_default_extensions() {
+fn pi_runner_command_includes_prompt_model_without_default_extensions() {
     let config = WorkerConfig::default();
     let plan = WorkerRunner::plan(
         &config,
@@ -113,15 +113,7 @@ fn pi_runner_command_includes_prompt_model_and_default_extensions() {
             "Do it"
         ]
     );
-    assert_eq!(plan.install_steps.len(), 2);
-    assert_eq!(
-        plan.install_steps[0].args,
-        vec!["install", "npm:pi-autoresearch"]
-    );
-    assert_eq!(
-        plan.install_steps[1].args,
-        vec!["install", "npm:@narumitw/pi-goal"]
-    );
+    assert!(plan.install_steps.is_empty());
 }
 
 #[test]

@@ -53,7 +53,50 @@ Prompt
 
     let worker = workflow.worker_runner_config();
     assert_eq!(worker.runner, WorkerRunnerKind::Pi);
-    assert_eq!(worker.extensions, vec!["autoresearch", "goal"]);
+    assert!(worker.extensions.is_empty());
+}
+
+#[test]
+fn workflow_parses_goal_config_with_explicit_extensions() {
+    let workflow = WorkflowConfig::from_markdown(
+        r#"---
+product: demo
+github_repo: example/demo
+goals:
+  enabled: true
+  max_parallel_research_runs: 5
+  max_research_rounds: 2
+  worker_extensions:
+    - autoresearch
+    - goal
+---
+Prompt
+"#,
+    )
+    .unwrap();
+
+    assert!(workflow.goals.enabled);
+    assert_eq!(workflow.goals.max_parallel_research_runs, 5);
+    assert_eq!(
+        workflow.goals.worker_extensions,
+        vec!["autoresearch", "goal"]
+    );
+}
+
+#[test]
+fn task_goal_mode_and_worker_extensions_are_explicit_labels() {
+    let mut spec = make_spec("bd-goal");
+    spec.labels = vec![
+        "mode:goal".into(),
+        "worker-extension:autoresearch".into(),
+        "worker-extension:goal".into(),
+    ];
+
+    assert!(spec.is_goal_mode());
+    assert_eq!(
+        spec.requested_worker_extensions(),
+        vec!["autoresearch", "goal"]
+    );
 }
 
 #[test]

@@ -14,7 +14,8 @@ use parking_lot::Mutex;
 use rusqlite::{params, Connection};
 
 use crate::core::error::ThalaError;
-use crate::core::ids::{InteractionId, RunId, TaskId};
+use crate::core::goal::{GoalRecord, ResearchRun};
+use crate::core::ids::{GoalId, InteractionId, RunId, TaskId};
 use crate::core::interaction::{InteractionResolution, InteractionTicket};
 use crate::core::run::TaskRun;
 use crate::core::task::TaskRecord;
@@ -60,6 +61,25 @@ impl SqliteStateStore {
                 resolved       INTEGER NOT NULL DEFAULT 0,
                 data           TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS goal_records (
+                goal_id        TEXT PRIMARY KEY,
+                source_task_id TEXT NOT NULL,
+                active         INTEGER NOT NULL DEFAULT 1,
+                data           TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_goal_records_source_task
+                ON goal_records(source_task_id);
+            CREATE TABLE IF NOT EXISTS research_runs (
+                research_run_id TEXT PRIMARY KEY,
+                goal_id         TEXT NOT NULL,
+                worker_run_id   TEXT NOT NULL,
+                active          INTEGER NOT NULL DEFAULT 1,
+                data            TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_research_runs_goal
+                ON research_runs(goal_id);
+            CREATE INDEX IF NOT EXISTS idx_research_runs_worker
+                ON research_runs(worker_run_id);
             ",
         )
         .map_err(|e| ThalaError::Storage(format!("Migration failed: {e}")))?;
@@ -125,6 +145,131 @@ impl StateStore for SqliteStateStore {
         rows.iter()
             .map(|json| serde_json::from_str(json).map_err(|e| ThalaError::Storage(e.to_string())))
             .collect()
+    }
+
+    async fn upsert_goal(&self, record: &GoalRecord) -> Result<(), ThalaError> {
+        let data = serde_json::to_string(record).map_err(|e| ThalaError::Storage(e.to_string()))?;
+        let goal_id = record.goal_id.as_str().to_owned();
+        let source_task_id = record.source_task_id.as_str().to_owned();
+        let active = i64::from(!record.status.is_terminal());
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO goal_records (goal_id, source_task_id, active, data) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(goal_id) DO UPDATE SET source_task_id = excluded.source_task_id, active = excluded.active, data = excluded.data",
+            params![goal_id, source_task_id, active, data],
+        )
+        .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_goal(&self, goal_id: &GoalId) -> Result<Option<GoalRecord>, ThalaError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT data FROM goal_records WHERE goal_id = ?1")
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map(params![goal_id.as_str()], |row| row.get(0))
+            .map_err(|e| ThalaError::Storage(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        match rows.into_iter().next() {
+            None => Ok(None),
+            Some(json) => Ok(Some(
+                serde_json::from_str(&json).map_err(|e| ThalaError::Storage(e.to_string()))?,
+            )),
+        }
+    }
+
+    async fn goal_for_task(&self, task_id: &TaskId) -> Result<Option<GoalRecord>, ThalaError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT data FROM goal_records WHERE source_task_id = ?1")
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map(params![task_id.as_str()], |row| row.get(0))
+            .map_err(|e| ThalaError::Storage(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        match rows.into_iter().next() {
+            None => Ok(None),
+            Some(json) => Ok(Some(
+                serde_json::from_str(&json).map_err(|e| ThalaError::Storage(e.to_string()))?,
+            )),
+        }
+    }
+
+    async fn active_goals(&self) -> Result<Vec<GoalRecord>, ThalaError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT data FROM goal_records WHERE active = 1")
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| ThalaError::Storage(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        rows.iter()
+            .map(|json| serde_json::from_str(json).map_err(|e| ThalaError::Storage(e.to_string())))
+            .collect()
+    }
+
+    async fn upsert_research_run(&self, run: &ResearchRun) -> Result<(), ThalaError> {
+        let data = serde_json::to_string(run).map_err(|e| ThalaError::Storage(e.to_string()))?;
+        let research_run_id = run.research_run_id.as_str().to_owned();
+        let goal_id = run.goal_id.as_str().to_owned();
+        let worker_run_id = run.worker_run_id.as_str().to_owned();
+        let active = i64::from(matches!(
+            run.status,
+            crate::core::goal::ResearchRunStatus::Planned
+                | crate::core::goal::ResearchRunStatus::Running
+        ));
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO research_runs (research_run_id, goal_id, worker_run_id, active, data) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(research_run_id) DO UPDATE SET goal_id = excluded.goal_id, worker_run_id = excluded.worker_run_id, active = excluded.active, data = excluded.data",
+            params![research_run_id, goal_id, worker_run_id, active, data],
+        )
+        .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn research_runs_for_goal(
+        &self,
+        goal_id: &GoalId,
+    ) -> Result<Vec<ResearchRun>, ThalaError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT data FROM research_runs WHERE goal_id = ?1")
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map(params![goal_id.as_str()], |row| row.get(0))
+            .map_err(|e| ThalaError::Storage(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        rows.iter()
+            .map(|json| serde_json::from_str(json).map_err(|e| ThalaError::Storage(e.to_string())))
+            .collect()
+    }
+
+    async fn research_run_for_worker(
+        &self,
+        worker_run_id: &RunId,
+    ) -> Result<Option<ResearchRun>, ThalaError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT data FROM research_runs WHERE worker_run_id = ?1")
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map(params![worker_run_id.as_str()], |row| row.get(0))
+            .map_err(|e| ThalaError::Storage(e.to_string()))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| ThalaError::Storage(e.to_string()))?;
+        match rows.into_iter().next() {
+            None => Ok(None),
+            Some(json) => Ok(Some(
+                serde_json::from_str(&json).map_err(|e| ThalaError::Storage(e.to_string()))?,
+            )),
+        }
     }
 
     async fn upsert_run(&self, run: &TaskRun) -> Result<(), ThalaError> {

@@ -5,6 +5,7 @@
 
 pub mod error;
 pub mod events;
+pub mod goal;
 pub mod ids;
 pub mod interaction;
 pub mod run;
@@ -16,7 +17,8 @@ pub mod workflow;
 
 // Convenience re-exports for common types.
 pub use error::ThalaError;
-pub use ids::{InteractionId, RunId, TaskId};
+pub use goal::{GoalRecord, GoalStatus, ResearchRun, ResearchRunStatus};
+pub use ids::{GoalId, InteractionId, RunId, TaskId};
 pub use run::{ExecutionBackendKind, RunObservation, RunStatus, TaskRun, WorkerHandle};
 pub use state::StateError;
 pub use task::{TaskRecord, TaskSpec, TaskStatus};

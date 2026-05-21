@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::core::events::OrchestratorEvent;
+use crate::core::ids::RunId;
 use crate::core::interaction::{
     InteractionAction, InteractionRequest, InteractionRequestKind, InteractionTicket,
 };
@@ -20,6 +21,7 @@ use crate::core::task::TaskStatus;
 use crate::core::workflow::WorkflowConfig;
 use crate::orchestrator::callback_server::{CallbackServer, CallbackServerConfig};
 use crate::orchestrator::dispatcher::{Dispatcher, DispatcherConfig};
+use crate::orchestrator::goal_coordinator::{GoalCoordinator, GoalCoordinatorConfig};
 use crate::orchestrator::human_loop::{HumanLoop, HumanLoopConfig};
 use crate::orchestrator::monitor::{Monitor, MonitorConfig};
 use crate::orchestrator::reconciler::Reconciler;
@@ -42,6 +44,7 @@ pub struct EngineConfig {
     pub monitor: MonitorConfig,
     pub human_loop: HumanLoopConfig,
     pub dispatcher: DispatcherConfig,
+    pub goal_coordinator: GoalCoordinatorConfig,
 }
 
 // ── OrchestratorEngine ────────────────────────────────────────────────────────
@@ -166,6 +169,17 @@ impl OrchestratorEngine {
             events_tx.clone(),
         ));
 
+        let goal_coordinator = Arc::new(GoalCoordinator::new(
+            self.config.goal_coordinator.clone(),
+            self.config.workflow.clone(),
+            self.source.clone(),
+            self.sink.clone(),
+            self.store.clone(),
+            self.router.clone(),
+            self.repo.clone(),
+            events_tx.clone(),
+        ));
+
         // Spawn long-running loops.
         tokio::spawn(async move { scheduler.run().await });
         tokio::spawn(async move { monitor.run().await });
@@ -182,12 +196,22 @@ impl OrchestratorEngine {
         while let Some(event) = events_rx.recv().await {
             let dispatcher = dispatcher.clone();
             let validator = validator.clone();
+            let goal_coordinator = goal_coordinator.clone();
             let store = store.clone();
             let sink = sink.clone();
             let layers = interaction_layers.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = route_event(event, dispatcher, validator, store, sink, layers).await
+                if let Err(e) = route_event(
+                    event,
+                    dispatcher,
+                    goal_coordinator,
+                    validator,
+                    store,
+                    sink,
+                    layers,
+                )
+                .await
                 {
                     tracing::error!("Event routing error: {e}");
                 }
@@ -204,6 +228,7 @@ impl OrchestratorEngine {
 async fn route_event(
     event: OrchestratorEvent,
     dispatcher: Arc<Dispatcher>,
+    goal_coordinator: Arc<GoalCoordinator>,
     validator: Arc<ValidatorCoordinator>,
     store: Arc<dyn StateStore>,
     sink: Arc<dyn TaskSink>,
@@ -212,23 +237,34 @@ async fn route_event(
     match event {
         OrchestratorEvent::DispatchReady { task_id, .. } => {
             tracing::debug!(task_id = %task_id, "Routing DispatchReady");
-            dispatcher.dispatch(task_id).await?;
+            if !goal_coordinator
+                .maybe_handle_dispatch_ready(&task_id)
+                .await?
+            {
+                dispatcher.dispatch(task_id).await?;
+            }
         }
 
         OrchestratorEvent::RunCompleted {
             task_id, run_id, ..
         } => {
             tracing::debug!(task_id = %task_id, run_id = %run_id, "Routing RunCompleted");
-            validator.handle_run_completed(&task_id, &run_id).await?;
-            send_status_notification(
-                &interaction_layers,
-                task_id,
-                run_id,
-                "Worker completed",
-                "validating",
-                "The worker reported completion. Thala is validating the result.",
-            )
-            .await;
+            if store.research_run_for_worker(&run_id).await?.is_some() {
+                goal_coordinator
+                    .handle_research_run_completed(&run_id)
+                    .await?;
+            } else {
+                validator.handle_run_completed(&task_id, &run_id).await?;
+                send_status_notification(
+                    &interaction_layers,
+                    task_id,
+                    run_id,
+                    "Worker completed",
+                    "validating",
+                    "The worker reported completion. Thala is validating the result.",
+                )
+                .await;
+            }
         }
 
         // Route RunTimedOut to a stuck-recovery path: create an interaction ticket so
@@ -237,6 +273,16 @@ async fn route_event(
             task_id, run_id, ..
         } => {
             tracing::warn!(task_id = %task_id, run_id = %run_id, "Routing RunTimedOut");
+            if store.research_run_for_worker(&run_id).await?.is_some() {
+                goal_coordinator
+                    .handle_research_run_failed(
+                        &run_id,
+                        "research run timed out: no worker output within the configured window",
+                    )
+                    .await?;
+                return Ok(());
+            }
+
             if let Err(e) = sink
                 .mark_stuck(
                     task_id.as_str(),
@@ -275,6 +321,13 @@ async fn route_event(
             ..
         } => {
             tracing::warn!(task_id = %task_id, run_id = %run_id, "Routing RunFailed");
+            if store.research_run_for_worker(&run_id).await?.is_some() {
+                goal_coordinator
+                    .handle_research_run_failed(&run_id, &reason)
+                    .await?;
+                return Ok(());
+            }
+
             if let Err(e) = sink.mark_stuck(task_id.as_str(), &reason).await {
                 tracing::warn!(task_id = %task_id, "Failed to sync failed run to Beads: {e}");
             }
@@ -380,6 +433,64 @@ async fn route_event(
                 ),
             )
             .await;
+        }
+
+        OrchestratorEvent::GoalActionRequired {
+            goal_id, reason, ..
+        } => {
+            tracing::warn!(goal_id = %goal_id, "Goal requires human action: {reason}");
+            if let Some(goal) = store.get_goal(&goal_id).await? {
+                let run_id = store
+                    .research_runs_for_goal(&goal_id)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .map_or_else(RunId::new_v4, |run| run.worker_run_id);
+                let req = InteractionRequest::new(
+                    goal.source_task_id.clone(),
+                    run_id,
+                    InteractionRequestKind::StuckNotification {
+                        reason: reason.clone(),
+                    },
+                    format!("[Goal] {}", goal.title),
+                    format!("Goal `{goal_id}` requires a human decision.\nReason: {reason}"),
+                    vec![
+                        InteractionAction::Retry,
+                        InteractionAction::Reroute {
+                            backend: "local".into(),
+                        },
+                        InteractionAction::Close,
+                    ],
+                );
+                save_and_send_ticket(&store, &interaction_layers, InteractionTicket::new(req))
+                    .await;
+            }
+        }
+
+        OrchestratorEvent::GoalCompleted { goal_id, .. } => {
+            tracing::info!(goal_id = %goal_id, "Goal completed");
+            if let Some(goal) = store.get_goal(&goal_id).await? {
+                send_status_notification(
+                    &interaction_layers,
+                    goal.source_task_id,
+                    RunId::new_v4(),
+                    "Goal completed",
+                    "goal-completed",
+                    format!("Goal `{goal_id}` completed."),
+                )
+                .await;
+            }
+        }
+
+        OrchestratorEvent::GoalFailed {
+            goal_id, reason, ..
+        } => {
+            tracing::warn!(goal_id = %goal_id, "Goal failed: {reason}");
+            if let Some(goal) = store.get_goal(&goal_id).await? {
+                if let Err(e) = sink.mark_stuck(goal.source_task_id.as_ref(), &reason).await {
+                    tracing::warn!(goal_id = %goal_id, "Failed to sync failed goal to Beads: {e}");
+                }
+            }
         }
 
         _ => {

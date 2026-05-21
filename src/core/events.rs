@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::core::ids::{InteractionId, RunId, TaskId};
+use crate::core::ids::{GoalId, InteractionId, RunId, TaskId};
 use crate::core::run::{ExecutionBackendKind, RunStatus};
 use crate::core::task::TaskStatus;
 use crate::core::validation::ValidationOutcome;
@@ -61,6 +61,21 @@ pub enum OrchestratorEvent {
         at: DateTime<Utc>,
     },
 
+    /// Routed → engine → goal coordinator.
+    GoalReady {
+        goal_id: GoalId,
+        task_id: TaskId,
+        at: DateTime<Utc>,
+    },
+
+    /// Routed → engine → goal coordinator.
+    ResearchRunCompleted {
+        goal_id: GoalId,
+        run_id: RunId,
+        report_artifact: String,
+        at: DateTime<Utc>,
+    },
+
     // ── Observability-only events (emitted but not consumed by any subsystem) ─
     RunLaunched {
         task_id: TaskId,
@@ -108,6 +123,34 @@ pub enum OrchestratorEvent {
     TaskSyncedToBeads {
         task_id: TaskId,
         beads_status: String,
+        at: DateTime<Utc>,
+    },
+    GoalPlanned {
+        goal_id: GoalId,
+        variants: Vec<String>,
+        at: DateTime<Utc>,
+    },
+    ResearchRunLaunched {
+        goal_id: GoalId,
+        run_id: RunId,
+        at: DateTime<Utc>,
+    },
+    GoalSynthesisReady {
+        goal_id: GoalId,
+        at: DateTime<Utc>,
+    },
+    GoalActionRequired {
+        goal_id: GoalId,
+        reason: String,
+        at: DateTime<Utc>,
+    },
+    GoalCompleted {
+        goal_id: GoalId,
+        at: DateTime<Utc>,
+    },
+    GoalFailed {
+        goal_id: GoalId,
+        reason: String,
         at: DateTime<Utc>,
     },
 }

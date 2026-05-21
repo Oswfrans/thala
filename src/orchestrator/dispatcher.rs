@@ -191,7 +191,12 @@ impl Dispatcher {
             .map(|base| format!("{base}/api/worker/callback"));
 
         let github_token = std::env::var(&self.workflow.execution.github_token_env).ok();
-        let worker = self.workflow.worker_runner_config();
+        let mut worker = self.workflow.worker_runner_config();
+        for extension in record.spec.requested_worker_extensions() {
+            if !worker.extensions.contains(&extension) {
+                worker.extensions.push(extension);
+            }
+        }
 
         // Persist the launch attempt before starting remote work. Fast remote
         // failures can call back before `launch()` returns; the callback server

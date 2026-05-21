@@ -16,7 +16,11 @@ execution:
 
 worker:
   runner: pi
-  extensions:
+  extensions: []
+
+goals:
+  enabled: false
+  worker_extensions:
     - autoresearch
     - goal
 

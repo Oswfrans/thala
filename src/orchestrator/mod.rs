@@ -11,6 +11,7 @@
 pub mod callback_server;
 pub mod dispatcher;
 pub mod engine;
+pub mod goal_coordinator;
 pub mod human_loop;
 pub mod monitor;
 pub mod prompt_builder;

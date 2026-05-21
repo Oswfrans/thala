@@ -36,6 +36,10 @@ pub struct WorkflowConfig {
     #[serde(default)]
     pub worker: WorkerConfig,
 
+    /// Opt-in goal-mode research fanout configuration.
+    #[serde(default)]
+    pub goals: GoalsConfig,
+
     /// Retry and reroute policy.
     #[serde(default)]
     pub retry: RetryPolicy,
@@ -266,7 +270,7 @@ impl WorkerRunnerKind {
 }
 
 fn default_worker_extensions() -> Vec<String> {
-    vec!["autoresearch".into(), "goal".into()]
+    Vec::new()
 }
 
 fn deserialize_extensions<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -322,6 +326,60 @@ pub struct LimitsConfig {
     /// Milliseconds without output change before a run is declared stalled.
     #[serde(default = "default_stall_timeout_ms")]
     pub stall_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalsConfig {
+    /// Goal-mode tasks are ignored unless explicitly enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Optional backend override for child research runs. Defaults to the
+    /// workflow execution backend.
+    #[serde(default)]
+    pub default_backend: Option<ExecutionBackendKind>,
+
+    /// Number of child research variants to launch in one round.
+    #[serde(default = "default_max_parallel_research_runs")]
+    pub max_parallel_research_runs: usize,
+
+    /// Maximum research rounds before a human decision is required.
+    #[serde(default = "default_max_research_rounds")]
+    pub max_research_rounds: u32,
+
+    /// Whether synthesized follow-up implementation tasks need human approval.
+    #[serde(default = "default_require_human_before_followup_tasks")]
+    pub require_human_before_followup_tasks: bool,
+
+    /// Extensions enabled for goal research workers. This is intentionally
+    /// separate from normal worker defaults.
+    #[serde(default, deserialize_with = "deserialize_extensions")]
+    pub worker_extensions: Vec<String>,
+}
+
+impl Default for GoalsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_backend: None,
+            max_parallel_research_runs: default_max_parallel_research_runs(),
+            max_research_rounds: default_max_research_rounds(),
+            require_human_before_followup_tasks: default_require_human_before_followup_tasks(),
+            worker_extensions: Vec::new(),
+        }
+    }
+}
+
+fn default_max_parallel_research_runs() -> usize {
+    3
+}
+
+fn default_max_research_rounds() -> u32 {
+    2
+}
+
+fn default_require_human_before_followup_tasks() -> bool {
+    true
 }
 
 fn default_max_concurrent() -> usize {

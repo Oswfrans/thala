@@ -1,7 +1,8 @@
 //! Port implementation tests — StateStore, Validator, and other ports.
 
 use thala::adapters::state::SqliteStateStore;
-use thala::core::ids::{RunId, TaskId};
+use thala::core::goal::{GoalRecord, GoalStatus, ResearchRun, ResearchRunStatus};
+use thala::core::ids::{GoalId, RunId, TaskId};
 use thala::core::interaction::{
     InteractionAction, InteractionRequest, InteractionRequestKind, InteractionResolution,
     InteractionTicket,
@@ -42,6 +43,18 @@ fn make_run(task_id: &str, attempt: u32, status: RunStatus) -> TaskRun {
     );
     run.status = status;
     run
+}
+
+fn make_goal(goal_id: &str, task_id: &str, status: GoalStatus) -> GoalRecord {
+    let mut goal = GoalRecord::new(
+        GoalId::new(goal_id),
+        TaskId::new(task_id),
+        "Research goal".into(),
+        "Find the best approach".into(),
+        2,
+    );
+    goal.status = status;
+    goal
 }
 
 #[tokio::test]
@@ -189,6 +202,90 @@ async fn sqlite_store_runs_for_task_filters_by_task() {
     let attempts: Vec<_> = runs.iter().map(|r| r.attempt).collect();
     assert!(attempts.contains(&1));
     assert!(attempts.contains(&2));
+}
+
+#[tokio::test]
+async fn sqlite_store_upsert_and_get_goal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.db");
+    let store = SqliteStateStore::open(&db_path).unwrap();
+
+    let goal = make_goal("goal-1000", "bd-goal", GoalStatus::Planning);
+    store.upsert_goal(&goal).await.unwrap();
+
+    let fetched = store
+        .get_goal(&GoalId::new("goal-1000"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.source_task_id.as_str(), "bd-goal");
+    assert_eq!(fetched.status, GoalStatus::Planning);
+
+    let by_task = store
+        .goal_for_task(&TaskId::new("bd-goal"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_task.goal_id.as_str(), "goal-1000");
+}
+
+#[tokio::test]
+async fn sqlite_store_active_goals_filters_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.db");
+    let store = SqliteStateStore::open(&db_path).unwrap();
+
+    store
+        .upsert_goal(&make_goal(
+            "goal-active",
+            "bd-active",
+            GoalStatus::Researching,
+        ))
+        .await
+        .unwrap();
+    store
+        .upsert_goal(&make_goal("goal-done", "bd-done", GoalStatus::Succeeded))
+        .await
+        .unwrap();
+
+    let active = store.active_goals().await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].goal_id.as_str(), "goal-active");
+}
+
+#[tokio::test]
+async fn sqlite_store_research_runs_are_lookupable_by_goal_and_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("state.db");
+    let store = SqliteStateStore::open(&db_path).unwrap();
+
+    let goal_id = GoalId::new("goal-runs");
+    let worker_run_id = RunId::new_v4();
+    let research = ResearchRun {
+        research_run_id: RunId::new_v4(),
+        goal_id: goal_id.clone(),
+        source_task_id: TaskId::new("bd-goal"),
+        child_task_id: TaskId::new("bd-goal-research-codebase-map"),
+        variant_name: "codebase-map".into(),
+        prompt: "research".into(),
+        backend: ExecutionBackendKind::Local,
+        worker_run_id: worker_run_id.clone(),
+        status: ResearchRunStatus::Running,
+        report_artifact: Some(".thala/research/goal-runs/run.json".into()),
+    };
+
+    store.upsert_research_run(&research).await.unwrap();
+
+    let by_goal = store.research_runs_for_goal(&goal_id).await.unwrap();
+    assert_eq!(by_goal.len(), 1);
+    assert_eq!(by_goal[0].variant_name, "codebase-map");
+
+    let by_worker = store
+        .research_run_for_worker(&worker_run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_worker.goal_id, goal_id);
 }
 
 #[tokio::test]

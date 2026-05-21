@@ -84,7 +84,11 @@ models:
 
 worker:
   runner: pi
-  extensions:
+  extensions: []
+
+goals:
+  enabled: false
+  worker_extensions:
     - autoresearch
     - goal
 
@@ -135,6 +139,24 @@ and Cloudflare workers intentionally execute `after_create`, `before_run`, and
 `after_run` through a shell so normal shell composition works; a non-zero hook
 exit fails that launch or run phase. `before_cleanup` is accepted in workflow
 files for compatibility but is not executed by the current backends.
+
+To opt into Pi extensions for a workflow or goal research workers:
+
+```yaml
+worker:
+  runner: pi
+  extensions:
+    - autoresearch
+    - goal
+```
+
+```yaml
+goals:
+  enabled: true
+  worker_extensions:
+    - autoresearch
+    - goal
+```
 
 To use OpenCode instead of the default Pi runner:
 
