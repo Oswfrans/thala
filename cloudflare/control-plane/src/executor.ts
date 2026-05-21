@@ -1,6 +1,6 @@
 import { getSandbox, type ExecOptions, type ExecResult } from "@cloudflare/sandbox";
 import type { Env } from "./auth";
-import type { StartTaskRequest, TaskState, TaskStatus } from "./types";
+import type { ResearchReport, StartTaskRequest, TaskResult, TaskState, TaskStatus } from "./types";
 import { terminalStatuses } from "./types";
 
 const WORKSPACE = "/workspace/task";
@@ -18,7 +18,7 @@ export interface StateStore {
   appendLog(stream: "stdout" | "stderr", message: string): Promise<TaskState>;
   transition(status: TaskStatus): Promise<TaskState>;
   fail(code: string, message: string): Promise<TaskState>;
-  complete(result: { commit_sha?: string; branch: string; summary: string }): Promise<TaskState>;
+  complete(result: TaskResult): Promise<TaskState>;
 }
 
 export class SandboxExecutor implements Executor {
@@ -120,12 +120,14 @@ export class SandboxExecutor implements Executor {
       );
 
       const commitSha = extractCommitSha(push.stdout);
+      const report = await this.readGoalReport(sandbox, task);
       await this.store.complete({
         commit_sha: commitSha,
         branch: task.repo.branch,
         summary: commitSha
           ? `Pushed changes to ${task.repo.branch} at ${commitSha}.`
           : `No changes to push on ${task.repo.branch}.`,
+        report,
       });
     } catch (error) {
       const current = await this.store.load().catch(() => undefined);
@@ -208,6 +210,25 @@ export class SandboxExecutor implements Executor {
     }
     for (const line of splitLines(result.stderr)) {
       await this.store.appendLog("stderr", this.redact(line));
+    }
+  }
+
+  private async readGoalReport(
+    sandbox: ReturnType<typeof getSandbox>,
+    task: StartTaskRequest,
+  ): Promise<ResearchReport | undefined> {
+    const result = await sandbox.exec(
+      "/workspace/thala-runner.sh read-report",
+      this.execOptions(task, WORKSPACE, 30_000),
+    );
+    if (!result.success || !result.stdout.trim()) {
+      return undefined;
+    }
+    try {
+      return JSON.parse(result.stdout) as ResearchReport;
+    } catch {
+      await this.store.appendLog("stderr", "goal report JSON could not be parsed");
+      return undefined;
     }
   }
 
@@ -379,8 +400,14 @@ case "\${1:-}" in
     run_timed git push origin "HEAD:\${THALA_REPO_BRANCH}"
     echo "THALA_COMMIT_SHA=$(git rev-parse HEAD)"
     ;;
+  read-report)
+    cd "$workspace"
+    find .thala/research -type f -name '*.json' -print -quit 2>/dev/null | while read -r report; do
+      cat "$report"
+    done
+    ;;
   *)
-    echo "usage: $0 {clone|after-create|before-run|run-agent|after-run|commit-push}" >&2
+    echo "usage: $0 {clone|after-create|before-run|run-agent|after-run|commit-push|read-report}" >&2
     exit 2
     ;;
 esac

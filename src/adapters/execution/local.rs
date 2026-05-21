@@ -244,6 +244,7 @@ impl ExecutionBackend for LocalBackend {
                 cursor: "dead".into(),
                 is_alive: false,
                 terminal_status: None,
+                terminal_report: None,
                 observed_at: chrono::Utc::now(),
             });
         }
@@ -264,6 +265,7 @@ impl ExecutionBackend for LocalBackend {
             cursor,
             is_alive: true,
             terminal_status: None,
+            terminal_report: None,
             observed_at: chrono::Utc::now(),
         })
     }

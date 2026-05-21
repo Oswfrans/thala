@@ -5,6 +5,7 @@ import type {
   LogsResponse,
   StartTaskRequest,
   StartTaskResponse,
+  TaskResult,
   TaskResultResponse,
   TaskState,
   TaskStatus,
@@ -246,11 +247,7 @@ class DurableStateStore implements StateStore {
     return updated;
   }
 
-  async complete(result: {
-    commit_sha?: string;
-    branch: string;
-    summary: string;
-  }): Promise<TaskState> {
+  async complete(result: TaskResult): Promise<TaskState> {
     const state = await this.load();
     const updated: TaskState = {
       ...state,

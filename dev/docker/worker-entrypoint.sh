@@ -28,16 +28,29 @@ send_callback() {
     local status="$1"
     local exit_code="$2"
     local error_message="${3:-}"
+    local report_file="${4:-}"
 
     local body
-    body="$(jq -n \
-        --arg task_id "${THALA_TASK_ID}" \
-        --arg run_id "${THALA_RUN_ID:-}" \
-        --arg status "${status}" \
-        --argjson exit_code "${exit_code}" \
-        --arg error_message "${error_message}" \
-        '{task_id: $task_id, run_id: $run_id, status: $status, exit_code: $exit_code, error_message: ($error_message | if . == "" then null else . end)}'
-    )"
+    if [[ -n "${report_file}" && -f "${report_file}" ]]; then
+        body="$(jq -n \
+            --arg task_id "${THALA_TASK_ID}" \
+            --arg run_id "${THALA_RUN_ID:-}" \
+            --arg status "${status}" \
+            --argjson exit_code "${exit_code}" \
+            --arg error_message "${error_message}" \
+            --slurpfile report "${report_file}" \
+            '{task_id: $task_id, run_id: $run_id, status: $status, exit_code: $exit_code, error_message: ($error_message | if . == "" then null else . end), report: $report[0]}'
+        )"
+    else
+        body="$(jq -n \
+            --arg task_id "${THALA_TASK_ID}" \
+            --arg run_id "${THALA_RUN_ID:-}" \
+            --arg status "${status}" \
+            --argjson exit_code "${exit_code}" \
+            --arg error_message "${error_message}" \
+            '{task_id: $task_id, run_id: $run_id, status: $status, exit_code: $exit_code, error_message: ($error_message | if . == "" then null else . end), report: null}'
+        )"
+    fi
 
     local http_code
     http_code="$(curl -s -o /dev/null -w "%{http_code}" \
@@ -51,6 +64,10 @@ send_callback() {
     )"
 
     echo "[thala-worker] Callback sent (status=${status}, http=${http_code})"
+}
+
+goal_report_file() {
+    find .thala/research -type f -name '*.json' -print -quit 2>/dev/null || true
 }
 
 repo_url() {
@@ -177,7 +194,7 @@ if [[ "${WORKER_EXIT}" -eq 0 ]]; then
         git push origin "HEAD:${THALA_TASK_BRANCH}"
         echo "[thala-worker] Pushed commit $(git rev-parse HEAD) to ${THALA_TASK_BRANCH}"
     fi
-    send_callback "success" 0 ""
+    send_callback "success" 0 "" "$(goal_report_file)"
 else
     send_callback "error" "${WORKER_EXIT}" "${RUNNER} exited with code ${WORKER_EXIT}"
 fi

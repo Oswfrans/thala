@@ -271,7 +271,10 @@ async fn sqlite_store_research_runs_are_lookupable_by_goal_and_worker() {
         backend: ExecutionBackendKind::Local,
         worker_run_id: worker_run_id.clone(),
         status: ResearchRunStatus::Running,
+        research_round: 1,
         report_artifact: Some(".thala/research/goal-runs/run.json".into()),
+        report: None,
+        failure: None,
     };
 
     store.upsert_research_run(&research).await.unwrap();

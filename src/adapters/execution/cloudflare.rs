@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::adapters::execution::runner::validate_extensions;
 use crate::core::error::ThalaError;
+use crate::core::goal::ResearchReport;
 use crate::core::run::{ExecutionBackendKind, RunObservation, RunStatus, WorkerHandle};
 use crate::ports::execution::{ExecutionBackend, LaunchRequest, LaunchedRun};
 
@@ -182,6 +183,8 @@ pub struct TaskResult {
     pub commit_sha: Option<String>,
     pub branch: String,
     pub summary: String,
+    #[serde(default)]
+    pub report: Option<ResearchReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -434,6 +437,15 @@ impl ExecutionBackend for CloudflareBackend {
         let log_cursor = prev_cursor.and_then(parse_log_cursor);
         let logs = self.task_logs(&handle.job_id, log_cursor).await?;
         let terminal_status = status.status.as_run_status();
+        let terminal_report = if matches!(terminal_status, Some(RunStatus::Completed)) {
+            self.task_result(&handle.job_id)
+                .await
+                .ok()
+                .and_then(|result| result.result)
+                .and_then(|result| result.report)
+        } else {
+            None
+        };
 
         Ok(RunObservation {
             cursor: format!(
@@ -444,6 +456,7 @@ impl ExecutionBackend for CloudflareBackend {
             ),
             is_alive: !status.status.is_terminal(),
             terminal_status,
+            terminal_report,
             observed_at: chrono::Utc::now(),
         })
     }

@@ -85,6 +85,28 @@ export interface TaskResult {
   commit_sha?: string;
   branch: string;
   summary: string;
+  report?: ResearchReport;
+}
+
+export interface ResearchReport {
+  goal_id: string;
+  run_id: string;
+  variant: string;
+  summary: string;
+  findings?: Array<{
+    claim: string;
+    evidence: string;
+    source?: string | null;
+    confidence: "low" | "medium" | "high";
+  }>;
+  recommendation: string;
+  risks?: string[];
+  follow_up_questions?: string[];
+  suggested_tasks?: Array<{
+    title: string;
+    acceptance_criteria: string;
+    context: string;
+  }>;
 }
 
 export interface TaskError {

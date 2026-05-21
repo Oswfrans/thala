@@ -180,12 +180,25 @@ impl OrchestratorEngine {
             events_tx.clone(),
         ));
 
+        goal_coordinator.resume_active_goals().await?;
+
         // Spawn long-running loops.
         tokio::spawn(async move { scheduler.run().await });
         tokio::spawn(async move { monitor.run().await });
         tokio::spawn(async move { human_loop.run().await });
         let v = validator.clone();
         tokio::spawn(async move { v.run(Duration::from_secs(60)).await });
+        let g = goal_coordinator.clone();
+        let goal_resume_interval = self.config.scheduler.poll_interval;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(goal_resume_interval);
+            loop {
+                interval.tick().await;
+                if let Err(e) = g.resume_active_goals().await {
+                    tracing::error!("Goal resume sweep failed: {e}");
+                }
+            }
+        });
 
         let store = self.store.clone();
         let sink = self.sink.clone();

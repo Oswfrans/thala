@@ -36,6 +36,12 @@ pub struct GoalRecord {
     pub status: GoalStatus,
     pub research_round: u32,
     pub max_rounds: u32,
+    #[serde(default)]
+    pub synthesis_decision: Option<GoalSynthesisDecision>,
+    #[serde(default)]
+    pub created_followup_titles: Vec<String>,
+    #[serde(default)]
+    pub created_followup_ids: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -57,6 +63,9 @@ impl GoalRecord {
             status: GoalStatus::Planning,
             research_round: 0,
             max_rounds,
+            synthesis_decision: None,
+            created_followup_titles: Vec::new(),
+            created_followup_ids: Vec::new(),
             created_at: now,
             updated_at: now,
         }
@@ -75,6 +84,25 @@ pub enum ResearchRunStatus {
     Failed,
 }
 
+impl ResearchRunStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchRunFailure {
+    pub reason: String,
+}
+
+impl ResearchRunFailure {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResearchRun {
     pub research_run_id: RunId,
@@ -86,10 +114,16 @@ pub struct ResearchRun {
     pub backend: ExecutionBackendKind,
     pub worker_run_id: RunId,
     pub status: ResearchRunStatus,
+    #[serde(default)]
+    pub research_round: u32,
     pub report_artifact: Option<String>,
+    #[serde(default)]
+    pub report: Option<ResearchReport>,
+    #[serde(default)]
+    pub failure: Option<ResearchRunFailure>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResearchReport {
     pub goal_id: String,
     pub run_id: String,
@@ -106,7 +140,7 @@ pub struct ResearchReport {
     pub suggested_tasks: Vec<SuggestedTask>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResearchFinding {
     pub claim: String,
     pub evidence: String,
@@ -114,7 +148,7 @@ pub struct ResearchFinding {
     pub confidence: Confidence,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     Low,
@@ -122,7 +156,7 @@ pub enum Confidence {
     High,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SuggestedTask {
     pub title: String,
     pub acceptance_criteria: String,

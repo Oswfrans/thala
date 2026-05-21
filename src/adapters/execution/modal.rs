@@ -296,6 +296,7 @@ impl ExecutionBackend for ModalBackend {
                     cursor: handle.job_id.clone(),
                     is_alive: true,
                     terminal_status: None,
+                    terminal_report: None,
                     observed_at: chrono::Utc::now(),
                 })
             }
@@ -309,6 +310,7 @@ impl ExecutionBackend for ModalBackend {
                     cursor,
                     is_alive: true,
                     terminal_status: None,
+                    terminal_report: None,
                     observed_at: chrono::Utc::now(),
                 })
             }
@@ -324,6 +326,7 @@ impl ExecutionBackend for ModalBackend {
                     cursor: "stopped".into(),
                     is_alive: false,
                     terminal_status: None,
+                    terminal_report: None,
                     observed_at: chrono::Utc::now(),
                 })
             }
@@ -336,6 +339,7 @@ impl ExecutionBackend for ModalBackend {
                     cursor: handle.job_id.clone(),
                     is_alive: true,
                     terminal_status: None,
+                    terminal_report: None,
                     observed_at: chrono::Utc::now(),
                 })
             }

@@ -98,6 +98,7 @@ def _send_callback(
     status: str,
     exit_code: int,
     error_message: str | None,
+    report: dict | None = None,
 ) -> None:
     """POST a completion callback to the Thala."""
     body = json.dumps(
@@ -107,6 +108,7 @@ def _send_callback(
             "status": status,
             "exit_code": exit_code,
             "error_message": error_message,
+            "report": report,
         }
     ).encode()
 
@@ -144,6 +146,15 @@ def _commit_and_push(task_id: str, task_branch: str) -> str | None:
     sha = subprocess.run(["git", "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE)
     subprocess.run(["git", "push", "origin", f"HEAD:{task_branch}"], check=True)
     return sha.stdout.decode().strip()
+
+
+def _read_goal_report() -> dict | None:
+    research_root = Path(".thala/research")
+    if not research_root.exists():
+        return None
+    for report_path in research_root.glob("*/*.json"):
+        return json.loads(report_path.read_text())
+    return None
 
 
 def _run_workflow_hook(hook_name: str, hook: str) -> int:
@@ -374,7 +385,8 @@ def run_worker() -> int:
         _send_callback(callback_url, run_token, run_id, task_id, "error", exc.returncode, msg)
         return exc.returncode or 1
 
-    _send_callback(callback_url, run_token, run_id, task_id, "success", 0, None)
+    report = _read_goal_report()
+    _send_callback(callback_url, run_token, run_id, task_id, "success", 0, None, report)
 
     return exit_code
 

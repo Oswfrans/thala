@@ -554,6 +554,7 @@ impl ExecutionBackend for KubernetesBackend {
             cursor,
             is_alive: state.is_alive,
             terminal_status: state.terminal_status,
+            terminal_report: None,
             observed_at: Utc::now(),
         })
     }

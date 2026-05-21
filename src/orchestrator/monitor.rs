@@ -122,6 +122,7 @@ impl Monitor {
         match &run.status {
             RunStatus::Launching => {
                 if let Some(terminal_status) = &observation.terminal_status {
+                    self.capture_terminal_report(run, &observation).await?;
                     self.handle_observed_terminal(run, terminal_status).await?;
                     return Ok(());
                 }
@@ -163,6 +164,7 @@ impl Monitor {
 
             RunStatus::Active => {
                 if let Some(terminal_status) = &observation.terminal_status {
+                    self.capture_terminal_report(run, &observation).await?;
                     self.handle_observed_terminal(run, terminal_status).await?;
                     return Ok(());
                 }
@@ -306,6 +308,22 @@ impl Monitor {
             RunStatus::Launching | RunStatus::Active => {}
         }
 
+        Ok(())
+    }
+
+    async fn capture_terminal_report(
+        &self,
+        run: &TaskRun,
+        observation: &crate::core::run::RunObservation,
+    ) -> anyhow::Result<()> {
+        let Some(report) = observation.terminal_report.clone() else {
+            return Ok(());
+        };
+        let Some(mut research_run) = self.store.research_run_for_worker(&run.run_id).await? else {
+            return Ok(());
+        };
+        research_run.report = Some(report);
+        self.store.upsert_research_run(&research_run).await?;
         Ok(())
     }
 

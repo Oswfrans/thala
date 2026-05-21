@@ -10,6 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::core::goal::ResearchReport;
 use crate::core::ids::{RunId, TaskId};
 
 // ── ExecutionBackendKind ──────────────────────────────────────────────────────
@@ -80,6 +81,11 @@ pub struct RunObservation {
     /// remote backends use it to report completion without relying on a
     /// callback path.
     pub terminal_status: Option<RunStatus>,
+
+    /// Structured goal-mode research report captured by polling backends at
+    /// terminal completion. Callback backends deliver the same shape inline in
+    /// their callback payload.
+    pub terminal_report: Option<ResearchReport>,
 
     /// When this observation was taken.
     pub observed_at: DateTime<Utc>,

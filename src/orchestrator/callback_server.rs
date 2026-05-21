@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use crate::core::events::OrchestratorEvent;
+use crate::core::goal::ResearchReport;
 use crate::core::ids::{RunId, TaskId};
 use crate::core::run::{RunStatus, TaskRun};
 use crate::core::task::TaskStatus;
@@ -103,6 +104,11 @@ struct WorkerCallbackPayload {
     /// research fanout.
     #[serde(default)]
     report_artifact: Option<String>,
+    /// Inline goal-mode research report. Remote goal workers must include this
+    /// on successful completion because Thala does not fetch report files from
+    /// remote git branches during synthesis.
+    #[serde(default)]
+    report: Option<ResearchReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -206,21 +212,26 @@ async fn handle_worker_callback(
         return Err(CallbackError::unauthorized("invalid callback token"));
     }
 
-    if let Some(report_artifact) = payload.report_artifact.as_deref() {
-        validate_report_artifact_path(report_artifact).map_err(CallbackError::bad_request)?;
-        if let Some(mut research_run) = state
-            .store
-            .research_run_for_worker(&run_id)
-            .await
-            .map_err(storage_error)?
-        {
+    if let Some(mut research_run) = state
+        .store
+        .research_run_for_worker(&run_id)
+        .await
+        .map_err(storage_error)?
+    {
+        if let Some(report_artifact) = payload.report_artifact.as_deref() {
+            validate_report_artifact_path(report_artifact).map_err(CallbackError::bad_request)?;
             research_run.report_artifact = Some(report_artifact.to_string());
-            state
-                .store
-                .upsert_research_run(&research_run)
-                .await
-                .map_err(storage_error)?;
         }
+        if let Some(report) = payload.report.as_ref() {
+            validate_research_report_ids(&report, &research_run.goal_id, &run_id)
+                .map_err(CallbackError::bad_request)?;
+            research_run.report = Some(report.clone());
+        }
+        state
+            .store
+            .upsert_research_run(&research_run)
+            .await
+            .map_err(storage_error)?;
     }
 
     if run.status.is_terminal() {
@@ -386,6 +397,17 @@ fn validate_report_artifact_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_research_report_ids(
+    report: &ResearchReport,
+    goal_id: &crate::core::ids::GoalId,
+    run_id: &RunId,
+) -> Result<(), String> {
+    if report.goal_id != goal_id.as_str() || report.run_id != run_id.as_str() {
+        return Err("research report IDs do not match expected goal/run".into());
+    }
+    Ok(())
+}
+
 fn storage_error(err: crate::core::error::ThalaError) -> CallbackError {
     CallbackError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }
@@ -401,7 +423,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::adapters::state::SqliteStateStore;
-    use crate::core::goal::{ResearchRun, ResearchRunStatus};
+    use crate::core::goal::{
+        Confidence, ResearchFinding, ResearchReport, ResearchRun, ResearchRunStatus,
+    };
     use crate::core::ids::GoalId;
     use crate::core::ids::RunId;
     use crate::core::run::{ExecutionBackendKind, TaskRun};
@@ -418,6 +442,25 @@ mod tests {
             model_override: None,
             always_human_review: false,
             labels: Vec::new(),
+        }
+    }
+
+    fn research_report(goal_id: &GoalId, run_id: &RunId) -> ResearchReport {
+        ResearchReport {
+            goal_id: goal_id.as_str().to_string(),
+            run_id: run_id.as_str().to_string(),
+            variant: "risk-scan".into(),
+            summary: "summary".into(),
+            findings: vec![ResearchFinding {
+                claim: "claim".into(),
+                evidence: "evidence".into(),
+                source: None,
+                confidence: Confidence::High,
+            }],
+            recommendation: "recommendation".into(),
+            risks: Vec::new(),
+            follow_up_questions: Vec::new(),
+            suggested_tasks: Vec::new(),
         }
     }
 
@@ -464,6 +507,7 @@ mod tests {
                 exit_code: Some(0),
                 error_message: None,
                 report_artifact: None,
+                report: None,
             },
         )
         .await
@@ -529,6 +573,7 @@ mod tests {
                 exit_code: Some(0),
                 error_message: None,
                 report_artifact: None,
+                report: None,
             },
         )
         .await
@@ -575,7 +620,10 @@ mod tests {
                 backend: ExecutionBackendKind::Modal,
                 worker_run_id: run_id.clone(),
                 status: ResearchRunStatus::Running,
+                research_round: 1,
                 report_artifact: Some(".thala/research/original.json".into()),
+                report: None,
+                failure: None,
             })
             .await
             .unwrap();
@@ -596,6 +644,7 @@ mod tests {
                 exit_code: Some(0),
                 error_message: None,
                 report_artifact: Some(".thala/research/poisoned.json".into()),
+                report: None,
             },
         )
         .await
@@ -610,6 +659,88 @@ mod tests {
         assert_eq!(
             research.report_artifact.as_deref(),
             Some(".thala/research/original.json")
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_callback_stores_inline_research_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(SqliteStateStore::open(tmp.path().join("state.db")).unwrap());
+        let (events_tx, _events_rx) = mpsc::channel(4);
+        let state = CallbackState {
+            store: store.clone(),
+            events_tx,
+        };
+
+        let task_id = TaskId::new("bd-callback-inline-report");
+        let run_id = RunId::from("run-callback-inline-report");
+        let goal_id = GoalId::new("goal-callback-inline-report");
+        let mut record = TaskRecord::new(task_spec(task_id.as_str()));
+        record.status = TaskStatus::Running;
+        record.active_run_id = Some(run_id.clone());
+        store.upsert_task(&record).await.unwrap();
+
+        let mut run = TaskRun::new(
+            run_id.clone(),
+            task_id.clone(),
+            1,
+            ExecutionBackendKind::Modal,
+        );
+        run.status = RunStatus::Active;
+        run.callback_token_hash = Some(sha256_hex(b"secret-token"));
+        store.upsert_run(&run).await.unwrap();
+        store
+            .upsert_research_run(&ResearchRun {
+                research_run_id: RunId::new_v4(),
+                goal_id: goal_id.clone(),
+                source_task_id: task_id.clone(),
+                child_task_id: task_id.clone(),
+                variant_name: "risk-scan".into(),
+                prompt: "research".into(),
+                backend: ExecutionBackendKind::Modal,
+                worker_run_id: run_id.clone(),
+                status: ResearchRunStatus::Running,
+                research_round: 1,
+                report_artifact: Some(".thala/research/original.json".into()),
+                report: None,
+                failure: None,
+            })
+            .await
+            .unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret-token"),
+        );
+        let report = research_report(&goal_id, &run_id);
+
+        let response = handle_worker_callback(
+            &state,
+            &headers,
+            WorkerCallbackPayload {
+                task_id: task_id.to_string(),
+                run_id: Some(run_id.to_string()),
+                status: "success".into(),
+                exit_code: Some(0),
+                error_message: None,
+                report_artifact: Some(".thala/research/inline.json".into()),
+                report: Some(report.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(response.ok);
+        let stored = store
+            .research_run_for_worker(&run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.report, Some(report));
+        assert_eq!(
+            stored.report_artifact.as_deref(),
+            Some(".thala/research/inline.json")
         );
     }
 
@@ -656,6 +787,7 @@ mod tests {
                 exit_code: Some(0),
                 error_message: None,
                 report_artifact: None,
+                report: None,
             },
         )
         .await

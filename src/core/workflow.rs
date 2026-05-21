@@ -343,6 +343,11 @@ pub struct GoalsConfig {
     #[serde(default = "default_max_parallel_research_runs")]
     pub max_parallel_research_runs: usize,
 
+    /// Minimum completed research reports required before synthesis. Defaults
+    /// to one so a single surviving variant can still unblock the goal.
+    #[serde(default = "default_min_successful_reports")]
+    pub min_successful_reports: usize,
+
     /// Maximum research rounds before a human decision is required.
     #[serde(default = "default_max_research_rounds")]
     pub max_research_rounds: u32,
@@ -363,6 +368,7 @@ impl Default for GoalsConfig {
             enabled: false,
             default_backend: None,
             max_parallel_research_runs: default_max_parallel_research_runs(),
+            min_successful_reports: default_min_successful_reports(),
             max_research_rounds: default_max_research_rounds(),
             require_human_before_followup_tasks: default_require_human_before_followup_tasks(),
             worker_extensions: Vec::new(),
@@ -372,6 +378,10 @@ impl Default for GoalsConfig {
 
 fn default_max_parallel_research_runs() -> usize {
     3
+}
+
+fn default_min_successful_reports() -> usize {
+    1
 }
 
 fn default_max_research_rounds() -> u32 {

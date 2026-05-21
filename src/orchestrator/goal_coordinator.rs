@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::core::goal::{
     GoalDecisionKind, GoalRecord, GoalStatus, GoalSynthesisDecision, ResearchReport, ResearchRun,
-    ResearchRunStatus,
+    ResearchRunFailure, ResearchRunStatus, SuggestedTask,
 };
 use crate::core::ids::{GoalId, RunId, TaskId};
 use crate::core::run::TaskRun;
@@ -119,11 +119,23 @@ impl GoalCoordinator {
             return Ok(());
         };
 
-        let artifact = self
-            .report_artifact_for(&research_run, worker_run_id)
-            .await?;
+        let artifact = match self
+            .capture_report_for_completion(&mut research_run, worker_run_id)
+            .await
+        {
+            Ok(artifact) => artifact,
+            Err(e) => {
+                let reason = e.to_string();
+                let goal_id = research_run.goal_id.clone();
+                research_run.status = ResearchRunStatus::Failed;
+                research_run.failure = Some(ResearchRunFailure::new(reason));
+                self.store.upsert_research_run(&research_run).await?;
+                return self.synthesize_if_ready(&goal_id).await;
+            }
+        };
         research_run.status = ResearchRunStatus::Completed;
         research_run.report_artifact = Some(artifact.clone());
+        research_run.failure = None;
         self.store.upsert_research_run(&research_run).await?;
 
         let _ = self
@@ -149,25 +161,60 @@ impl GoalCoordinator {
             return Ok(());
         };
 
+        let goal_id = research_run.goal_id.clone();
         research_run.status = ResearchRunStatus::Failed;
+        research_run.failure = Some(ResearchRunFailure::new(reason));
         self.store.upsert_research_run(&research_run).await?;
 
-        if let Some(mut goal) = self.store.get_goal(&research_run.goal_id).await? {
-            goal.status = GoalStatus::Failed;
+        self.synthesize_if_ready(&goal_id).await
+    }
+
+    pub async fn resume_active_goals(&self) -> anyhow::Result<()> {
+        for goal in self.store.active_goals().await? {
+            match goal.status {
+                GoalStatus::Planning => {
+                    if let Some(spec) = self.load_spec(&goal.source_task_id).await? {
+                        self.plan_and_launch(goal, spec).await?;
+                    }
+                }
+                GoalStatus::Researching => {
+                    self.synthesize_if_ready(&goal.goal_id).await?;
+                }
+                GoalStatus::Synthesizing => {
+                    self.resume_synthesis(goal).await?;
+                }
+                GoalStatus::CreatingFollowups => {
+                    self.resume_followup_creation(goal).await?;
+                }
+                GoalStatus::WaitingForHuman
+                | GoalStatus::Succeeded
+                | GoalStatus::Failed
+                | GoalStatus::Resolved => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn resume_synthesis(&self, mut goal: GoalRecord) -> anyhow::Result<()> {
+        if let Some(decision) = goal.synthesis_decision.clone() {
+            return self.apply_decision(goal, decision).await;
+        }
+        goal.status = GoalStatus::Researching;
+        goal.touch();
+        self.store.upsert_goal(&goal).await?;
+        self.synthesize_if_ready(&goal.goal_id).await
+    }
+
+    async fn resume_followup_creation(&self, goal: GoalRecord) -> anyhow::Result<()> {
+        let Some(decision) = goal.synthesis_decision.clone() else {
+            let mut goal = goal;
+            goal.status = GoalStatus::Synthesizing;
             goal.touch();
             self.store.upsert_goal(&goal).await?;
-        }
-
-        let _ = self
-            .events_tx
-            .send(OrchestratorEvent::GoalFailed {
-                goal_id: research_run.goal_id,
-                reason: reason.to_string(),
-                at: chrono::Utc::now(),
-            })
-            .await;
-
-        Ok(())
+            return self.resume_synthesis(goal).await;
+        };
+        self.create_followup_tasks(goal, decision.follow_up_tasks)
+            .await
     }
 
     async fn load_spec(&self, task_id: &TaskId) -> anyhow::Result<Option<TaskSpec>> {
@@ -208,9 +255,10 @@ impl GoalCoordinator {
             return Ok(());
         }
 
-        let variants = self
-            .plan_research_variants_with_manager(&goal, &spec)
-            .await?;
+        let variants = uniquify_variants(
+            self.plan_research_variants_with_manager(&goal, &spec)
+                .await?,
+        );
         let _ = self
             .events_tx
             .send(OrchestratorEvent::GoalPlanned {
@@ -219,6 +267,24 @@ impl GoalCoordinator {
                 at: chrono::Utc::now(),
             })
             .await;
+
+        let active_count = self
+            .active_in_flight_count_excluding(&goal.source_task_id)
+            .await?;
+        let available = self
+            .workflow
+            .limits
+            .max_concurrent_runs
+            .saturating_sub(active_count);
+        if available == 0 {
+            tracing::info!(
+                goal_id = %goal.goal_id,
+                active = active_count,
+                max = self.workflow.limits.max_concurrent_runs,
+                "Deferring goal research fanout; no global execution slots available"
+            );
+            return Ok(());
+        }
 
         goal.status = GoalStatus::Researching;
         goal.research_round += 1;
@@ -238,14 +304,13 @@ impl GoalCoordinator {
             .unwrap_or_else(|| self.workflow.models.worker.clone());
 
         let mut first_run_id = None;
-        for (index, variant) in variants.iter().enumerate() {
+        for (index, variant) in variants.iter().take(available).enumerate() {
             let child_task_id = TaskId::new(format!(
                 "{}-research-{}",
                 spec.id.as_str(),
                 sanitize_variant(variant)
             ));
             let worker_run_id = RunId::new_v4();
-            first_run_id.get_or_insert(worker_run_id.clone());
             let report_artifact = research_report_artifact(&goal.goal_id, &worker_run_id);
             let prompt = research_prompt(
                 &goal,
@@ -306,7 +371,10 @@ impl GoalCoordinator {
                 backend: backend_kind.clone(),
                 worker_run_id: worker_run_id.clone(),
                 status: ResearchRunStatus::Running,
+                research_round: goal.research_round,
                 report_artifact: Some(report_artifact),
+                report: None,
+                failure: None,
             };
             self.store.upsert_research_run(&research_run).await?;
 
@@ -350,11 +418,17 @@ impl GoalCoordinator {
                     )?;
                     self.store.upsert_run(&failed_run).await?;
                     research_run.status = ResearchRunStatus::Failed;
+                    research_run.failure = Some(ResearchRunFailure::new(reason.clone()));
                     self.store.upsert_research_run(&research_run).await?;
-                    self.fail_goal_launch(&goal, &spec, &reason).await?;
-                    return Err(e.into());
+                    tracing::warn!(
+                        goal_id = %goal.goal_id,
+                        worker_run_id = %worker_run_id,
+                        "Research variant launch failed: {reason}"
+                    );
+                    continue;
                 }
             };
+            first_run_id.get_or_insert(worker_run_id.clone());
             task_run = self
                 .store
                 .get_run(&worker_run_id)
@@ -389,6 +463,19 @@ impl GoalCoordinator {
             if let Err(e) = self.sink.mark_in_progress(spec.id.as_str()).await {
                 tracing::warn!(task_id = %spec.id, "Failed to update goal task in Beads: {e}");
             }
+        } else {
+            let reason = "all research variant launches failed";
+            goal.status = GoalStatus::Failed;
+            goal.touch();
+            self.store.upsert_goal(&goal).await?;
+            let _ = self
+                .events_tx
+                .send(OrchestratorEvent::GoalFailed {
+                    goal_id: goal.goal_id.clone(),
+                    reason: reason.into(),
+                    at: chrono::Utc::now(),
+                })
+                .await;
         }
 
         Ok(())
@@ -433,9 +520,46 @@ impl GoalCoordinator {
         Ok(())
     }
 
-    async fn report_artifact_for(
+    async fn active_in_flight_count_excluding(&self, excluded: &TaskId) -> anyhow::Result<usize> {
+        let active = self.store.active_tasks().await?;
+        // Match the scheduler's durable task-record accounting for normal work,
+        // then add active research runs because goal child workers are TaskRun
+        // records without Beads TaskRecords. The goal source task is excluded:
+        // it is the coordinator shell, not a worker slot.
+        let active_tasks = active
+            .iter()
+            .filter(|record| record.spec.id != *excluded)
+            .filter(|record| {
+                matches!(
+                    record.status,
+                    TaskStatus::Dispatching
+                        | TaskStatus::Running
+                        | TaskStatus::WaitingForHuman
+                        | TaskStatus::Validating
+                )
+            })
+            .count();
+        let mut active_research_runs = 0;
+        for goal in self.store.active_goals().await? {
+            active_research_runs += self
+                .store
+                .research_runs_for_goal(&goal.goal_id)
+                .await?
+                .into_iter()
+                .filter(|run| {
+                    matches!(
+                        run.status,
+                        ResearchRunStatus::Planned | ResearchRunStatus::Running
+                    )
+                })
+                .count();
+        }
+        Ok(active_tasks + active_research_runs)
+    }
+
+    async fn capture_report_for_completion(
         &self,
-        research_run: &ResearchRun,
+        research_run: &mut ResearchRun,
         worker_run_id: &RunId,
     ) -> anyhow::Result<String> {
         let Some(run) = self.store.get_run(worker_run_id).await? else {
@@ -448,28 +572,61 @@ impl GoalCoordinator {
         validate_report_artifact_path(&relative)?;
         if let Some(worktree) = run.worktree_path.as_deref() {
             let path = Path::new(worktree).join(&relative);
-            parse_research_report(&path, &research_run.goal_id, worker_run_id)?;
+            let report = parse_research_report(&path, &research_run.goal_id, worker_run_id)?;
+            research_run.report = Some(report);
+            return Ok(relative);
         }
-        Ok(relative)
+        if let Some(report) = research_run.report.as_ref() {
+            validate_research_report(report, &research_run.goal_id, worker_run_id)?;
+            return Ok(relative);
+        }
+        anyhow::bail!(
+            "remote research run {worker_run_id} completed without inline report payload"
+        );
     }
 
     async fn synthesize_if_ready(&self, goal_id: &GoalId) -> anyhow::Result<()> {
         let _guard = self.synthesis_lock.lock().await;
-        let runs = self.store.research_runs_for_goal(goal_id).await?;
-        if runs.is_empty()
-            || runs
-                .iter()
-                .any(|run| run.status != ResearchRunStatus::Completed)
-        {
-            return Ok(());
-        }
-
         let Some(mut goal) = self.store.get_goal(goal_id).await? else {
             return Ok(());
         };
         if goal.status != GoalStatus::Researching {
             return Ok(());
         }
+        let runs = self.store.research_runs_for_goal(goal_id).await?;
+        let current_round = runs
+            .into_iter()
+            .filter(|run| run.research_round == goal.research_round)
+            .collect::<Vec<_>>();
+        if current_round.is_empty() || current_round.iter().any(|run| !run.status.is_terminal()) {
+            return Ok(());
+        }
+
+        let completed = current_round
+            .iter()
+            .filter(|run| run.status == ResearchRunStatus::Completed)
+            .cloned()
+            .collect::<Vec<_>>();
+        if completed.len() < self.workflow.goals.min_successful_reports.max(1) {
+            let reason = format!(
+                "only {} research report(s) completed; required {}",
+                completed.len(),
+                self.workflow.goals.min_successful_reports.max(1)
+            );
+            goal.status = GoalStatus::Failed;
+            goal.touch();
+            self.store.upsert_goal(&goal).await?;
+            let _ = self
+                .events_tx
+                .send(OrchestratorEvent::GoalFailed {
+                    goal_id: goal_id.clone(),
+                    reason,
+                    at: chrono::Utc::now(),
+                })
+                .await;
+            return Ok(());
+        }
+
         goal.status = GoalStatus::Synthesizing;
         goal.touch();
         self.store.upsert_goal(&goal).await?;
@@ -481,7 +638,7 @@ impl GoalCoordinator {
             })
             .await;
 
-        let reports = self.load_reports(&runs).await?;
+        let reports = self.load_reports(&completed).await?;
         let decision = self
             .synthesize_reports_with_manager(&goal, &reports)
             .await?;
@@ -533,10 +690,15 @@ Respond with JSON only matching:
 
 Reports:
 {}
+
+Received {} report(s) for this round. The configured fanout target is {}; if
+reports are missing, hedge confidence and call out the degraded fanout.
 "#,
             goal.title,
             goal.objective,
-            serde_json::to_string_pretty(reports)?
+            serde_json::to_string_pretty(reports)?,
+            reports.len(),
+            self.workflow.goals.max_parallel_research_runs,
         );
 
         let response = reqwest::Client::new()
@@ -653,68 +815,16 @@ Limit variants to at most {}. Use distinct approaches.
     async fn load_reports(&self, runs: &[ResearchRun]) -> anyhow::Result<Vec<ResearchReport>> {
         let mut reports = Vec::new();
         for run in runs {
-            let Some(artifact) = run.report_artifact.as_deref() else {
-                anyhow::bail!("research run {} has no report artifact", run.worker_run_id);
+            let Some(report) = run.report.clone() else {
+                anyhow::bail!(
+                    "completed research run {} has no stored report",
+                    run.worker_run_id
+                );
             };
-            validate_report_artifact_path(artifact)?;
-            if let Some(task_run) = self.store.get_run(&run.worker_run_id).await? {
-                if let Some(worktree) = task_run.worktree_path.as_deref() {
-                    reports.push(parse_research_report(
-                        &Path::new(worktree).join(artifact),
-                        &run.goal_id,
-                        &run.worker_run_id,
-                    )?);
-                    continue;
-                }
-                if let Some(branch) = task_run.remote_branch.as_deref() {
-                    reports.push(
-                        self.read_remote_report(branch, artifact, &run.goal_id, &run.worker_run_id)
-                            .await?,
-                    );
-                    continue;
-                }
-            }
-            reports.push(synthetic_remote_report(run, artifact));
+            validate_research_report(&report, &run.goal_id, &run.worker_run_id)?;
+            reports.push(report);
         }
         Ok(reports)
-    }
-
-    async fn read_remote_report(
-        &self,
-        branch: &str,
-        artifact: &str,
-        goal_id: &GoalId,
-        run_id: &RunId,
-    ) -> anyhow::Result<ResearchReport> {
-        let fetch = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(&self.config.workspace_root)
-            .args(["fetch", "origin", branch])
-            .output()
-            .await?;
-        if !fetch.status.success() {
-            anyhow::bail!(
-                "failed to fetch remote research branch {branch}: {}",
-                String::from_utf8_lossy(&fetch.stderr).trim()
-            );
-        }
-
-        let object = format!("origin/{branch}:{artifact}");
-        let show = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(&self.config.workspace_root)
-            .args(["show", &object])
-            .output()
-            .await?;
-        if !show.status.success() {
-            anyhow::bail!(
-                "failed to read research artifact {artifact} from {branch}: {}",
-                String::from_utf8_lossy(&show.stderr).trim()
-            );
-        }
-
-        let raw = String::from_utf8(show.stdout)?;
-        parse_research_report_json(&raw, goal_id, run_id)
     }
 
     async fn apply_decision(
@@ -722,6 +832,10 @@ Limit variants to at most {}. Use distinct approaches.
         mut goal: GoalRecord,
         decision: GoalSynthesisDecision,
     ) -> anyhow::Result<()> {
+        goal.synthesis_decision = Some(decision.clone());
+        goal.touch();
+        self.store.upsert_goal(&goal).await?;
+
         match decision.decision {
             GoalDecisionKind::Done => {
                 goal.status = GoalStatus::Succeeded;
@@ -745,11 +859,15 @@ Limit variants to at most {}. Use distinct approaches.
                 goal.status = GoalStatus::WaitingForHuman;
                 goal.touch();
                 self.store.upsert_goal(&goal).await?;
+                let reason = decision
+                    .human_question
+                    .clone()
+                    .unwrap_or_else(|| "follow-up task creation requires human approval".into());
                 let _ = self
                     .events_tx
                     .send(OrchestratorEvent::GoalActionRequired {
                         goal_id: goal.goal_id,
-                        reason: "follow-up task creation requires human approval".into(),
+                        reason,
                         at: chrono::Utc::now(),
                     })
                     .await;
@@ -758,22 +876,8 @@ Limit variants to at most {}. Use distinct approaches.
                 goal.status = GoalStatus::CreatingFollowups;
                 goal.touch();
                 self.store.upsert_goal(&goal).await?;
-                for task in decision.follow_up_tasks {
-                    self.sink
-                        .create_task(NewTaskRequest {
-                            title: task.title,
-                            acceptance_criteria: task.acceptance_criteria,
-                            context: task.context,
-                            priority: None,
-                            labels: vec!["generated-by:thala-goal".into()],
-                            submitted_by: "thala:goal".into(),
-                            always_human_review: false,
-                        })
-                        .await?;
-                }
-                goal.status = GoalStatus::Succeeded;
-                goal.touch();
-                self.store.upsert_goal(&goal).await?;
+                self.create_followup_tasks(goal, decision.follow_up_tasks)
+                    .await?;
             }
             GoalDecisionKind::ResearchMore if goal.research_round < goal.max_rounds => {
                 goal.status = GoalStatus::Planning;
@@ -787,11 +891,15 @@ Limit variants to at most {}. Use distinct approaches.
                 goal.status = GoalStatus::WaitingForHuman;
                 goal.touch();
                 self.store.upsert_goal(&goal).await?;
+                let reason = decision
+                    .human_question
+                    .clone()
+                    .unwrap_or_else(|| decision.reason.clone());
                 let _ = self
                     .events_tx
                     .send(OrchestratorEvent::GoalActionRequired {
                         goal_id: goal.goal_id,
-                        reason: decision.reason,
+                        reason,
                         at: chrono::Utc::now(),
                     })
                     .await;
@@ -810,6 +918,40 @@ Limit variants to at most {}. Use distinct approaches.
                     .await;
             }
         }
+        Ok(())
+    }
+
+    async fn create_followup_tasks(
+        &self,
+        mut goal: GoalRecord,
+        tasks: Vec<SuggestedTask>,
+    ) -> anyhow::Result<()> {
+        let goal_label = format!("generated-by:thala-goal:{}", goal.goal_id);
+        for task in tasks {
+            if goal.created_followup_titles.contains(&task.title) {
+                continue;
+            }
+            let title = task.title.clone();
+            let id = self
+                .sink
+                .create_task(NewTaskRequest {
+                    title: task.title,
+                    acceptance_criteria: task.acceptance_criteria,
+                    context: task.context,
+                    priority: None,
+                    labels: vec!["generated-by:thala-goal".into(), goal_label.clone()],
+                    submitted_by: "thala:goal".into(),
+                    always_human_review: false,
+                })
+                .await?;
+            goal.created_followup_titles.push(title);
+            goal.created_followup_ids.push(id);
+            goal.touch();
+            self.store.upsert_goal(&goal).await?;
+        }
+        goal.status = GoalStatus::Succeeded;
+        goal.touch();
+        self.store.upsert_goal(&goal).await?;
         Ok(())
     }
 }
@@ -857,6 +999,7 @@ Produce a structured JSON report at `{report_artifact}` with:
 - suggested_tasks: title, acceptance_criteria, context
 
 Do not create a PR. Write DONE to `.thala/signals/{child_task_id}.signal` when the report is complete.
+For remote backends, the worker wrapper reads this report file and includes it in the authenticated completion callback.
 ",
         goal_id = goal.goal_id,
         run_id = worker_run_id,
@@ -886,10 +1029,19 @@ fn parse_research_report_json(
     run_id: &RunId,
 ) -> anyhow::Result<ResearchReport> {
     let report: ResearchReport = serde_json::from_str(raw)?;
+    validate_research_report(&report, goal_id, run_id)?;
+    Ok(report)
+}
+
+fn validate_research_report(
+    report: &ResearchReport,
+    goal_id: &GoalId,
+    run_id: &RunId,
+) -> anyhow::Result<()> {
     if report.goal_id != goal_id.as_str() || report.run_id != run_id.as_str() {
         anyhow::bail!("research report IDs do not match expected goal/run");
     }
-    Ok(report)
+    Ok(())
 }
 
 fn validate_report_artifact_path(path: &str) -> anyhow::Result<()> {
@@ -1014,22 +1166,8 @@ fn truncate_for_error(text: &str) -> String {
     }
 }
 
-fn synthetic_remote_report(run: &ResearchRun, artifact: &str) -> ResearchReport {
-    ResearchReport {
-        goal_id: run.goal_id.as_str().to_string(),
-        run_id: run.worker_run_id.as_str().to_string(),
-        variant: run.variant_name.clone(),
-        summary: format!("Research report available at {artifact}"),
-        findings: Vec::new(),
-        recommendation: String::new(),
-        risks: Vec::new(),
-        follow_up_questions: Vec::new(),
-        suggested_tasks: Vec::new(),
-    }
-}
-
 fn sanitize_variant(value: &str) -> String {
-    value
+    let sanitized = value
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' {
@@ -1038,9 +1176,80 @@ fn sanitize_variant(value: &str) -> String {
                 '-'
             }
         })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if sanitized.is_empty() {
+        "variant".into()
+    } else {
+        sanitized
+    }
+}
+
+fn uniquify_variants(variants: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashMap::<String, usize>::new();
+    variants
+        .into_iter()
+        .map(|variant| {
+            let base = sanitize_variant(&variant);
+            let count = seen.entry(base.clone()).or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                base
+            } else {
+                format!("{base}-{}", *count)
+            }
+        })
         .collect()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_variant_names_are_suffixed_after_sanitizing() {
+        let variants = uniquify_variants(vec![
+            "risk scan".into(),
+            "risk-scan".into(),
+            "risk/scan".into(),
+            "***".into(),
+            "***".into(),
+        ]);
+
+        assert_eq!(
+            variants,
+            vec![
+                "risk-scan",
+                "risk-scan-2",
+                "risk-scan-3",
+                "variant",
+                "variant-2"
+            ]
+        );
+    }
+
+    #[test]
+    fn stored_report_validation_rejects_wrong_ids() {
+        let goal_id = GoalId::new("goal-1");
+        let run_id = RunId::from("run-1");
+        let report = ResearchReport {
+            goal_id: "other-goal".into(),
+            run_id: run_id.as_str().into(),
+            variant: "codebase-map".into(),
+            summary: "summary".into(),
+            findings: Vec::new(),
+            recommendation: "recommendation".into(),
+            risks: Vec::new(),
+            follow_up_questions: Vec::new(),
+            suggested_tasks: Vec::new(),
+        };
+
+        let err = validate_research_report(&report, &goal_id, &run_id).unwrap_err();
+        assert!(err.to_string().contains("IDs do not match"));
+    }
 }
